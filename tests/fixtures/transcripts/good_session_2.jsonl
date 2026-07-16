@@ -1,0 +1,2 @@
+{"type":"user","version":"2.1.211","timestamp":"2026-05-01T08:00:00Z","sessionId":"22222222-2222-2222-2222-222222222222","isSidechain":false,"message":{"role":"user","content":"Older session"}}
+{"type":"assistant","version":"2.1.211","timestamp":"2026-05-01T08:01:00Z","sessionId":"22222222-2222-2222-2222-222222222222","isSidechain":false,"message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_101","name":"mcp__weather__forecast","input":{"city":"Lyon"}},{"type":"tool_use","id":"toolu_102","name":"Read","input":{"file_path":"README.md"}}]}}

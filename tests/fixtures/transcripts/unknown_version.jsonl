@@ -1,0 +1,2 @@
+{"type":"user","version":"3.0.1","timestamp":"2026-06-11T09:00:00Z","sessionId":"33333333-3333-3333-3333-333333333333","isSidechain":false,"message":{"role":"user","content":"Future format"}}
+{"type":"assistant","version":"3.0.1","timestamp":"2026-06-11T09:01:00Z","sessionId":"33333333-3333-3333-3333-333333333333","isSidechain":false,"message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_201","name":"mcp__github__get_pr","input":{"number":99}}]}}
