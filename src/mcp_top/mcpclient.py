@@ -6,6 +6,7 @@ import json
 import os
 import queue
 import shutil
+import signal
 import subprocess
 import threading
 import time
@@ -51,6 +52,10 @@ def list_server_tools(cfg: ServerConfig, timeout: float = 20.0) -> ServerTools:
         command = cfg.command
         if os.name == "nt":
             command = shutil.which(command) or command
+        popen_kwargs: dict[str, Any] = {}
+        if os.name != "nt":
+            # Own process group so cleanup can kill the whole server tree.
+            popen_kwargs["start_new_session"] = True
         process = subprocess.Popen(
             [command, *cfg.args],
             stdin=subprocess.PIPE,
@@ -59,6 +64,7 @@ def list_server_tools(cfg: ServerConfig, timeout: float = 20.0) -> ServerTools:
             env={**os.environ, **cfg.env},
             text=True,
             encoding="utf-8",
+            **popen_kwargs,
         )
         if process.stdin is None or process.stdout is None:
             raise RuntimeError("could not open server stdio pipes")
@@ -203,9 +209,29 @@ def _wait_for_response(
 
 
 def _stop_process(process: subprocess.Popen[str]) -> None:
+    """Stop the server and its whole process tree.
+
+    Wrapper commands (npx.cmd, launcher scripts) spawn grandchildren that
+    inherit the stdout pipe; terminating only the direct child leaves that
+    pipe open, so the reader thread would block forever. Kill the tree.
+    Never close process.stdout here: closing a buffered stream while the
+    reader thread is blocked on it deadlocks on the stream's internal lock.
+    """
+
     try:
         if process.poll() is None:
-            process.terminate()
+            if os.name == "nt":
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(process.pid)],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=5,
+                )
+            else:
+                try:
+                    os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+                except (OSError, PermissionError):
+                    process.terminate()
             try:
                 process.wait(timeout=2)
             except subprocess.TimeoutExpired:
@@ -219,9 +245,8 @@ def _stop_process(process: subprocess.Popen[str]) -> None:
         except Exception:
             pass
     finally:
-        for stream in (process.stdin, process.stdout):
-            if stream is not None:
-                try:
-                    stream.close()
-                except Exception:
-                    pass
+        if process.stdin is not None:
+            try:
+                process.stdin.close()
+            except Exception:
+                pass
