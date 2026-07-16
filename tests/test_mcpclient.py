@@ -40,7 +40,8 @@ class McpClientTests(unittest.TestCase):
 
         self.assertEqual(result.status, "unsupported")
         self.assertEqual(
-            result.error, "unsupported transport (v0.1 queries stdio only)"
+            result.error,
+            "unsupported transport (this version queries stdio only)",
         )
         self.assertEqual(result.tools, [])
 

@@ -10,10 +10,13 @@ import shutil
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 import _path  # noqa: F401
 
 from mcp_top import cli
+from mcp_top.coverage import Coverage
+from mcp_top.engine import CliReport, Report, ServerRow
 
 
 FIXTURES = os.path.join(os.path.dirname(__file__), "fixtures")
@@ -59,20 +62,24 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         payload = json.loads(output)
-        self.assertEqual(payload["schema"], "mcp-top/v1")
-        self.assertEqual(payload["coverage"]["transcripts_found"], 2)
-        self.assertEqual(payload["coverage"]["transcripts_parsed"], 1)
-        self.assertEqual(len(payload["coverage"]["transcripts_skipped"]), 1)
+        self.assertEqual(payload["schema"], "mcp-top/v2")
+        self.assertEqual(len(payload["clis"]), 1)
+        cli_payload = payload["clis"][0]
+        self.assertEqual(cli_payload["cli"], "claude-code")
+        self.assertEqual(cli_payload["coverage"]["transcripts_found"], 2)
+        self.assertEqual(cli_payload["coverage"]["transcripts_parsed"], 1)
+        self.assertEqual(len(cli_payload["coverage"]["transcripts_skipped"]), 1)
         self.assertIn(
             "unknown format version",
-            payload["coverage"]["transcripts_skipped"][0][1],
+            cli_payload["coverage"]["transcripts_skipped"][0][1],
         )
         server = next(
-            row for row in payload["servers"] if row["server"] == "github"
+            row for row in cli_payload["servers"] if row["server"] == "github"
         )
         self.assertIsNotNone(server["def_tokens"])
         self.assertFalse(server["def_tokens"]["exact"])
         self.assertEqual(server["calls"], 2)
+        self.assertEqual(server["usage_status"], "measured")
         self.assertEqual(server["verdict"], "review")
 
     def test_human_output_starts_with_coverage_then_table(self) -> None:
@@ -90,11 +97,102 @@ class CliTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         payload = json.loads(output)
         server = next(
-            row for row in payload["servers"] if row["server"] == "github"
+            row
+            for row in payload["clis"][0]["servers"]
+            if row["server"] == "github"
         )
         self.assertEqual(server["def_status"], "unsupported")
         self.assertEqual(server["def_error"], "skipped by --no-query")
         self.assertIsNone(server["def_tokens"])
+
+    def test_json_emits_nullable_calls_and_usage_status(self) -> None:
+        report = Report(
+            clis=[
+                CliReport(
+                    cli="future-cli",
+                    rows=[
+                        ServerRow(
+                            server="alpha",
+                            scope="user",
+                            transport="stdio",
+                            def_tokens=None,
+                            def_status="unsupported",
+                            def_error="not implemented",
+                            tool_count=None,
+                            calls=None,
+                            usage_status="unsupported",
+                            called_tools={},
+                            verdict="unknown",
+                        )
+                    ],
+                    window=None,
+                    coverage=Coverage(
+                        transcripts_found=0,
+                        transcripts_parsed=0,
+                        transcripts_skipped=[],
+                        in_window=0,
+                        total_tool_calls=0,
+                        mcp_tool_calls=0,
+                        servers_queried_ok=0,
+                        servers_query_failed=[],
+                        config_warnings=[],
+                        usage_note="no transcript adapter for this CLI in v0.2",
+                    ),
+                )
+            ],
+            generated_note="note",
+        )
+
+        payload = cli._report_json(report)
+
+        server = payload["clis"][0]["servers"][0]
+        self.assertIsNone(payload["clis"][0]["window"])
+        self.assertIsNone(server["calls"])
+        self.assertEqual(server["usage_status"], "unsupported")
+        self.assertEqual(server["verdict"], "unknown")
+
+    def test_human_output_renders_unknown_usage_with_dash(self) -> None:
+        report = Report(
+            clis=[
+                CliReport(
+                    cli="future-cli",
+                    rows=[
+                        ServerRow(
+                            server="alpha",
+                            scope="user",
+                            transport="stdio",
+                            def_tokens=None,
+                            def_status="unsupported",
+                            def_error="not implemented",
+                            tool_count=None,
+                            calls=None,
+                            usage_status="unsupported",
+                            called_tools={},
+                            verdict="unknown",
+                        )
+                    ],
+                    window=None,
+                    coverage=Coverage(
+                        transcripts_found=0,
+                        transcripts_parsed=0,
+                        transcripts_skipped=[],
+                        in_window=0,
+                        total_tool_calls=0,
+                        mcp_tool_calls=0,
+                        servers_queried_ok=0,
+                        servers_query_failed=[],
+                        config_warnings=[],
+                    ),
+                )
+            ],
+            generated_note="note",
+        )
+
+        rendered = cli._render_human(report)
+
+        self.assertIn("CALLS(window)", rendered)
+        self.assertIn("alpha", rendered)
+        self.assertIn("-              unknown", rendered)
 
     def test_human_output_explains_unavailable_definitions(self) -> None:
         exit_code, output = self._run("--no-query")
@@ -121,6 +219,16 @@ class CliTests(unittest.TestCase):
                     with self.assertRaises(SystemExit) as raised:
                         cli.main([option, value])
                 self.assertEqual(raised.exception.code, 2)
+
+    def test_python_version_floor_returns_2(self) -> None:
+        stderr = io.StringIO()
+
+        with mock.patch.object(cli.sys, "version_info", (3, 10, 0)):
+            with contextlib.redirect_stderr(stderr):
+                exit_code = cli.main(["--version"])
+
+        self.assertEqual(exit_code, 2)
+        self.assertIn("Python 3.11 or newer", stderr.getvalue())
 
     def _run(self, *extra: str) -> tuple[int, str]:
         output = io.StringIO()

@@ -29,7 +29,7 @@ class ClaudeCodeAdapterTests(unittest.TestCase):
 
         counts: dict[str, int] = {}
         for call in result.tool_calls:
-            counts[call.tool] = counts.get(call.tool, 0) + 1
+            counts[call.raw] = counts.get(call.raw, 0) + 1
         self.assertEqual(result.status, "parsed")
         self.assertIsNone(result.skip_reason)
         self.assertEqual(result.session_id, "11111111-1111-1111-1111-111111111111")
@@ -44,8 +44,16 @@ class ClaudeCodeAdapterTests(unittest.TestCase):
             },
         )
         self.assertEqual(
-            [call.tool for call in result.tool_calls if call.sidechain], ["Bash"]
+            [call.raw for call in result.tool_calls if call.sidechain], ["Bash"]
         )
+        github_call = result.tool_calls[0]
+        self.assertEqual(github_call.kind, "mcp")
+        self.assertEqual(github_call.server, "github")
+        self.assertEqual(github_call.tool, "get_pr")
+        bash_call = result.tool_calls[1]
+        self.assertEqual(bash_call.kind, "builtin")
+        self.assertIsNone(bash_call.server)
+        self.assertIsNone(bash_call.tool)
         self.assertEqual(result.first_ts, "2026-06-10T10:00:00.000Z")
         self.assertEqual(result.last_ts, "2026-06-10T10:04:00.000Z")
 
@@ -57,7 +65,7 @@ class ClaudeCodeAdapterTests(unittest.TestCase):
         self.assertEqual(result.status, "parsed")
         self.assertEqual(result.versions_seen, ["2.1.211"])
         self.assertEqual(
-            [call.tool for call in result.tool_calls],
+            [call.raw for call in result.tool_calls],
             ["mcp__weather__forecast", "Read"],
         )
 
@@ -204,10 +212,54 @@ class ClaudeCodeAdapterTests(unittest.TestCase):
             result = parse_session(path)
 
         self.assertEqual(
-            [call.tool for call in result.tool_calls],
+            [call.raw for call in result.tool_calls],
             ["First", "NoId", "NonStringId"],
         )
         self.assertEqual(result.duplicate_tool_use, 1)
+
+    def test_mcp_prefixed_unparseable_call_is_unattributed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            record = self._record("2.1.207")
+            record["type"] = "assistant"
+            record["message"] = {
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_1",
+                        "name": "mcp__unattributed",
+                    }
+                ]
+            }
+            path = self._write_records(temporary, "unattributed.jsonl", [record])
+
+            result = parse_session(path)
+
+        self.assertEqual(result.status, "parsed")
+        self.assertEqual(result.tool_calls[0].raw, "mcp__unattributed")
+        self.assertEqual(result.tool_calls[0].kind, "mcp-unattributed")
+        self.assertIsNone(result.tool_calls[0].server)
+        self.assertIsNone(result.tool_calls[0].tool)
+
+    def test_configured_server_attribution_prefers_longest_name(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            record = self._record("2.1.207")
+            record["type"] = "assistant"
+            record["message"] = {
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_1",
+                        "name": "mcp__a__b__complex",
+                    }
+                ]
+            }
+            path = self._write_records(temporary, "configured.jsonl", [record])
+
+            result = parse_session(path, {"a", "a__b"})
+
+        self.assertEqual(result.tool_calls[0].kind, "mcp")
+        self.assertEqual(result.tool_calls[0].server, "a__b")
+        self.assertEqual(result.tool_calls[0].tool, "complex")
 
     def test_pathological_json_line_is_counted_bad_without_raising(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

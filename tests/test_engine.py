@@ -8,7 +8,7 @@ import _path  # noqa: F401
 
 from mcp_top.config import ServerConfig
 from mcp_top.counter import UsageWindow
-from mcp_top.engine import build_report
+from mcp_top.engine import build_cli_report
 from mcp_top.mcpclient import ServerTools
 
 
@@ -42,9 +42,16 @@ class EngineTests(unittest.TestCase):
                 "Read": 7,
             },
             sidechain_counts={},
+            server_tool_counts={
+                "beta_review": {"lookup": 2},
+                "gamma_keep": {"search": 6, "fetch": 4},
+                "rogue": {"surprise": 1},
+                "a__b": {"complex": 2},
+            },
+            unattributed_mcp_calls=3,
         )
 
-        report = build_report(servers, definitions, [], window)
+        report = build_cli_report("claude-code", servers, definitions, [], window)
 
         self.assertEqual(
             [row.server for row in report.rows],
@@ -63,6 +70,8 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(rows["gamma_keep"].verdict, "keep")
         self.assertEqual(rows["delta_error"].verdict, "review")
         self.assertIsNone(rows["delta_error"].def_tokens)
+        self.assertEqual(rows["delta_error"].calls, 0)
+        self.assertEqual(rows["delta_error"].usage_status, "measured")
         self.assertEqual(rows["rogue"].scope, "(not configured)")
         self.assertEqual(rows["rogue"].called_tools, {"surprise": 1})
         self.assertEqual(rows["a__b"].called_tools, {"complex": 2})
@@ -70,6 +79,27 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(report.coverage.mcp_tool_calls, 15)
         self.assertEqual(report.coverage.unattributed_mcp_calls, 3)
         self.assertEqual(report.coverage.servers_unsupported, 0)
+
+    def test_unsupported_usage_yields_unknown_and_nullable_calls(self) -> None:
+        servers = [self._server("alpha")]
+        definitions = [self._tools("alpha", 1)]
+
+        report = build_cli_report(
+            "future-cli",
+            servers,
+            definitions,
+            [],
+            None,
+        )
+
+        row = report.rows[0]
+        self.assertIsNone(row.calls)
+        self.assertEqual(row.usage_status, "unsupported")
+        self.assertEqual(row.verdict, "unknown")
+        self.assertEqual(
+            report.coverage.usage_note,
+            "no transcript adapter for this CLI in v0.2",
+        )
 
     def _server(self, name: str) -> ServerConfig:
         return ServerConfig(

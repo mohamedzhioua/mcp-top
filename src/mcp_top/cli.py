@@ -17,13 +17,33 @@ from mcp_top.adapters.claude_code import (
 from mcp_top.config import ServerConfig, discover_servers
 from mcp_top.counter import count_calls
 from mcp_top.coverage import render_coverage_text
-from mcp_top.engine import Report, ServerRow, build_report
+from mcp_top.engine import (
+    CliReport,
+    CliReportInput,
+    Report,
+    ServerRow,
+    build_report,
+)
 from mcp_top.mcpclient import ServerTools, list_server_tools
 from mcp_top.tokens import fmt
 
 
+CLIS = {
+    "claude-code": {
+        "discover_servers": discover_servers,
+        "find_transcripts": find_transcripts,
+        "parse_session": parse_session,
+        "session_key": session_key,
+    }
+}
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run mcp-top, returning 2 for invalid usage or an internal failure."""
+
+    if sys.version_info < (3, 11):
+        print("mcp-top requires Python 3.11 or newer.", file=sys.stderr)
+        return 2
 
     parser = _parser()
     args = parser.parse_args(argv)
@@ -50,6 +70,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--days", type=_positive_int, default=30)
     parser.add_argument("--timeout", type=_positive_float, default=20.0)
     parser.add_argument(
+        "--cli",
+        choices=[*CLIS.keys(), "all"],
+        default="all",
+        help="CLI transcript/config source to inspect",
+    )
+    parser.add_argument(
         "--no-query",
         action="store_true",
         help="do not launch configured MCP servers",
@@ -62,26 +88,35 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _build(args: argparse.Namespace) -> Report:
-    servers, warnings = discover_servers(args.home, args.project)
-    server_tools_list = [
-        _load_server_tools(server, args.no_query, args.timeout)
-        for server in servers
-    ]
-    paths = find_transcripts(args.home)
-    sessions = [parse_session(path) for path in paths]
-    window = count_calls(
-        sessions,
-        [session_key(path, args.home) for path in paths],
-        window_sessions=args.sessions,
-        window_days=args.days,
-    )
-    return build_report(
-        servers,
-        server_tools_list,
-        sessions,
-        window,
-        config_warnings=warnings,
-    )
+    cli_names = list(CLIS) if args.cli == "all" else [args.cli]
+    inputs: list[CliReportInput] = []
+    for cli_name in cli_names:
+        entry = CLIS[cli_name]
+        servers, warnings = entry["discover_servers"](args.home, args.project)
+        server_tools_list = [
+            _load_server_tools(server, args.no_query, args.timeout)
+            for server in servers
+        ]
+        paths = entry["find_transcripts"](args.home)
+        configured = {server.name for server in servers}
+        sessions = [entry["parse_session"](path, configured) for path in paths]
+        window = count_calls(
+            sessions,
+            [entry["session_key"](path, args.home) for path in paths],
+            window_sessions=args.sessions,
+            window_days=args.days,
+        )
+        inputs.append(
+            CliReportInput(
+                cli_name=cli_name,
+                servers=servers,
+                server_tools_list=server_tools_list,
+                sessions=sessions,
+                window=window,
+                config_warnings=warnings,
+            )
+        )
+    return build_report(inputs)
 
 
 def _load_server_tools(
@@ -98,7 +133,7 @@ def _load_server_tools(
         return ServerTools(
             server=server.name,
             status="unsupported",
-            error="unsupported transport (v0.1 queries stdio only)",
+            error="unsupported transport (this version queries stdio only)",
             tools=[],
         )
     return list_server_tools(server, timeout=timeout)
@@ -106,15 +141,25 @@ def _load_server_tools(
 
 def _report_json(report: Report) -> dict:
     return {
-        "schema": "mcp-top/v1",
+        "schema": "mcp-top/v2",
         "generated_note": report.generated_note,
-        "window": {
-            "sessions": report.window.window_sessions,
-            "days": report.window.window_days,
-            "sessions_considered": report.window.sessions_considered,
-        },
-        "coverage": asdict(report.coverage),
-        "servers": [_row_json(row) for row in report.rows],
+        "clis": [_cli_json(cli_report) for cli_report in report.clis],
+    }
+
+
+def _cli_json(cli_report: CliReport) -> dict:
+    window = None
+    if cli_report.window is not None:
+        window = {
+            "sessions": cli_report.window.window_sessions,
+            "days": cli_report.window.window_days,
+            "sessions_considered": cli_report.window.sessions_considered,
+        }
+    return {
+        "cli": cli_report.cli,
+        "window": window,
+        "coverage": asdict(cli_report.coverage),
+        "servers": [_row_json(row) for row in cli_report.rows],
     }
 
 
@@ -134,13 +179,23 @@ def _row_json(row: ServerRow) -> dict:
         "def_error": row.def_error,
         "tool_count": row.tool_count,
         "calls": row.calls,
+        "usage_status": row.usage_status,
         "called_tools": row.called_tools,
         "verdict": row.verdict,
     }
 
 
 def _render_human(report: Report) -> str:
-    coverage = render_coverage_text(report.coverage)
+    sections = [
+        _render_cli_human(cli_report, include_header=len(report.clis) > 1)
+        for cli_report in report.clis
+    ]
+    sections.append(report.generated_note)
+    return "\n\n".join(sections)
+
+
+def _render_cli_human(cli_report: CliReport, include_header: bool) -> str:
+    coverage = render_coverage_text(cli_report.coverage)
     headers = (
         "SERVER",
         "SCOPE",
@@ -150,7 +205,7 @@ def _render_human(report: Report) -> str:
         "VERDICT",
     )
     body = []
-    for row in report.rows:
+    for row in cli_report.rows:
         verdict = row.verdict
         if row.verdict == "prune" and row.def_tokens is not None:
             verdict = f"prune -> save {fmt(row.def_tokens)}/session"
@@ -160,7 +215,7 @@ def _render_human(report: Report) -> str:
                 row.scope,
                 "?" if row.tool_count is None else str(row.tool_count),
                 "?" if row.def_tokens is None else fmt(row.def_tokens),
-                str(row.calls),
+                "-" if row.calls is None else str(row.calls),
                 verdict,
             )
         )
@@ -173,7 +228,7 @@ def _render_human(report: Report) -> str:
     table_lines = [_format_table_row(headers, widths)]
     table_lines.append("  ".join("-" * width for width in widths))
     table_lines.extend(_format_table_row(row, widths) for row in body)
-    for row in report.rows:
+    for row in cli_report.rows:
         if row.def_status != "ok":
             table_lines.append(
                 f"  {row.server}: definitions unavailable — "
@@ -181,7 +236,7 @@ def _render_human(report: Report) -> str:
             )
 
     breakdown = []
-    for row in report.rows:
+    for row in cli_report.rows:
         if row.verdict not in {"review", "keep"} or not row.called_tools:
             continue
         breakdown.append(f"{row.server} called tools:")
@@ -190,10 +245,12 @@ def _render_human(report: Report) -> str:
         ):
             breakdown.append(f"  - {tool}: {count}")
 
-    parts = [coverage, "\n".join(table_lines)]
+    parts = []
+    if include_header:
+        parts.append(f"=== {cli_report.cli} ===")
+    parts.extend([coverage, "\n".join(table_lines)])
     if breakdown:
         parts.append("\n".join(breakdown))
-    parts.append(report.generated_note)
     return "\n\n".join(parts)
 
 

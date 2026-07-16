@@ -34,6 +34,7 @@ class CoverageTests(unittest.TestCase):
             duplicate_tool_use=2,
             unattributed_mcp_calls=3,
             servers_unsupported=4,
+            usage_note="no transcript adapter for this CLI in v0.2",
         )
 
         rendered = render_coverage_text(coverage)
@@ -63,6 +64,10 @@ class CoverageTests(unittest.TestCase):
         )
         self.assertIn(
             "3 MCP-prefixed call(s) could not be attributed to a server",
+            rendered,
+        )
+        self.assertIn(
+            "usage: no transcript adapter for this CLI in v0.2",
             rendered,
         )
 

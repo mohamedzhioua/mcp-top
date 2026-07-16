@@ -6,55 +6,19 @@ import glob
 import json
 import os
 import re
-from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Collection
+
+from mcp_top.names import parse_mcp_tool_name
+from mcp_top.transcripts import SessionResult, ToolCall, parse_timestamp
 
 
 ADAPTER_NAME = "claude-code"
 SUPPORTED_VERSION_PATTERN = r"2\.\d"
 
 
-@dataclass
-class ToolCall:
-    """A tool invocation recorded in a Claude Code assistant message."""
-
-    tool: str
-    timestamp: str
-    sidechain: bool
-
-
-@dataclass
-class SessionResult:
-    """The parsed contents and coverage status of one transcript."""
-
-    path: str
-    session_id: str | None
-    status: str
-    skip_reason: str | None
-    versions_seen: list[str]
-    tool_calls: list[ToolCall]
-    first_ts: str | None
-    last_ts: str | None
-    bad_lines: int = 0
-    duplicate_tool_use: int = 0
-
-
-def parse_timestamp(value: str) -> datetime | None:
-    """Parse a transcript timestamp as UTC, accepting Claude's Z suffix."""
-
-    if value.endswith("Z"):
-        value = value[:-1] + "+00:00"
-    try:
-        parsed = datetime.fromisoformat(value)
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
-
-
-def parse_session(path: str) -> SessionResult:
+def parse_session(
+    path: str, configured: Collection[str] | None = None
+) -> SessionResult:
     """Parse one Claude Code transcript, skipping unsafe or damaged formats."""
 
     try:
@@ -135,10 +99,11 @@ def parse_session(path: str) -> SessionResult:
             if not isinstance(tool, str):
                 continue
             tool_calls.append(
-                ToolCall(
-                    tool=tool,
-                    timestamp=timestamp if isinstance(timestamp, str) else "",
-                    sidechain=record.get("isSidechain") is True,
+                _tool_call(
+                    tool,
+                    timestamp if isinstance(timestamp, str) else "",
+                    record.get("isSidechain") is True,
+                    configured,
                 )
             )
 
@@ -211,6 +176,42 @@ def parse_session(path: str) -> SessionResult:
         last_ts=last_ts,
         bad_lines=bad_lines,
         duplicate_tool_use=duplicate_tool_use,
+    )
+
+
+def _tool_call(
+    raw: str,
+    timestamp: str,
+    sidechain: bool,
+    configured: Collection[str] | None,
+) -> ToolCall:
+    parsed = parse_mcp_tool_name(raw, configured)
+    if parsed is not None:
+        server, tool = parsed
+        return ToolCall(
+            raw=raw,
+            kind="mcp",
+            server=server,
+            tool=tool,
+            timestamp=timestamp,
+            sidechain=sidechain,
+        )
+    if raw.startswith("mcp__"):
+        return ToolCall(
+            raw=raw,
+            kind="mcp-unattributed",
+            server=None,
+            tool=None,
+            timestamp=timestamp,
+            sidechain=sidechain,
+        )
+    return ToolCall(
+        raw=raw,
+        kind="builtin",
+        server=None,
+        tool=None,
+        timestamp=timestamp,
+        sidechain=sidechain,
     )
 
 

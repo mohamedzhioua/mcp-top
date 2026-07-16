@@ -4,7 +4,7 @@
 > tokens against how often each tool is actually called - from local transcripts already on
 > disk - and get a safe prune list.
 
-License: MIT · Dependencies: none (Python stdlib, 3.9+)
+License: MIT · Dependencies: none (Python stdlib, 3.11+)
 
 ## The Problem
 
@@ -45,7 +45,7 @@ Definition token counts use the chars/4 heuristic; ~ means estimate.
 1. Read Claude Code MCP configs across user, user-project, and project scopes.
 2. Query each configured stdio server read-only with MCP `initialize` and `tools/list` to fetch its actual tool definitions.
 3. Parse local session transcripts through a versioned adapter and count tool calls in a recent window, defaulting to the last 30 sessions and 30 days.
-4. Join definition cost to recent usage, rank servers, and print `keep`, `review`, or `prune` verdicts.
+4. Join definition cost to recent usage, rank servers, and print `keep`, `review`, `prune`, or `unknown` verdicts.
 
 Naive timestamps are treated as UTC. Subagent transcripts are included and grouped under their parent session for windowing.
 
@@ -63,9 +63,11 @@ Querying definitions launches the configured server commands. `mcp-top` sends re
 
 `--timeout SECONDS`: per-server stdio query timeout. Default: `20.0`.
 
+`--cli NAME`: CLI source to inspect: `claude-code` or `all`. Default: `all`.
+
 `--no-query`: do not launch configured MCP servers. Default: off.
 
-`--json`: emit machine-readable JSON instead of the human table. Default: off.
+`--json`: emit machine-readable JSON schema `mcp-top/v2` instead of the human table. JSON v2 groups results under `clis[]`; each CLI entry has `cli`, `window`, `coverage`, and `servers`.
 
 `--version`: print the installed version and exit.
 
@@ -81,21 +83,22 @@ Token counts are labeled. `~` means an estimate from the `chars/4` heuristic, wi
 
 Unknown transcript format versions are reported and skipped. They are never guessed into counts that might be wrong.
 
-A zero-call verdict is `prune` only when definition cost was actually measured. With unmeasured definition cost, zero calls is `review`.
+A zero-call verdict is `prune` only when definition cost was actually measured. With unmeasured definition cost, zero calls is `review`. When a CLI has no measurable usage, calls are unknown and the verdict is `unknown`.
 
 ## Verdicts
 
-| Verdict | v0.1 default |
+| Verdict | v0.2 default |
 | --- | --- |
 | `prune` | 0 calls with measured definition cost |
 | `review` | 1-3 calls, or 0 calls with unmeasured definition cost |
 | `keep` | More than 3 calls |
+| `unknown` | Usage is unsupported for this CLI/server |
 
 ## Adapter Support
 
 Today, `mcp-top` supports Claude Code JSONL transcripts with format versions `2.x`. Unknown versions surface in the coverage block.
 
-Roadmap: `--prune` suggestion block and a second CLI adapter in v0.2; CI threshold mode in v1.0.
+Roadmap: `--prune` suggestion block and additional CLI adapters in upcoming changes; CI threshold mode in v1.0.
 
 ## Non-Goals
 
