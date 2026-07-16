@@ -7,8 +7,8 @@ import unittest
 
 import _path  # noqa: F401
 
-from mcp_top.adapters.claude_code import SessionResult, ToolCall
 from mcp_top.counter import count_calls
+from mcp_top.transcripts import SessionResult, ToolCall
 
 
 NOW = datetime(2026, 6, 15, 12, 0, tzinfo=timezone.utc)
@@ -22,20 +22,20 @@ class CountCallsTests(unittest.TestCase):
             self._session(
                 "older",
                 "2026-06-12T12:00:00Z",
-                [ToolCall("OldTool", "2026-06-12T12:00:00Z", False)],
+                [self._call("OldTool", "2026-06-12T12:00:00Z")],
             ),
             self._session(
                 "newest",
                 "2026-06-14T12:00:00Z",
                 [
-                    ToolCall("SharedTool", "2026-06-14T12:00:00Z", False),
-                    ToolCall("SideTool", "2026-06-14T12:00:01Z", True),
+                    self._call("SharedTool", "2026-06-14T12:00:00Z"),
+                    self._call("SideTool", "2026-06-14T12:00:01Z", True),
                 ],
             ),
             self._session(
                 "middle",
                 "2026-06-13T12:00:00Z",
-                [ToolCall("SharedTool", "2026-06-13T12:00:00Z", False)],
+                [self._call("SharedTool", "2026-06-13T12:00:00Z")],
             ),
         ]
 
@@ -58,17 +58,17 @@ class CountCallsTests(unittest.TestCase):
             self._session(
                 "boundary",
                 "2026-05-16T12:00:00+00:00",
-                [ToolCall("BoundaryTool", "2026-05-16T12:00:00+00:00", True)],
+                [self._call("BoundaryTool", "2026-05-16T12:00:00+00:00", True)],
             ),
             self._session(
                 "too-old",
                 "2026-05-16T11:59:59Z",
-                [ToolCall("OldTool", "2026-05-16T11:59:59Z", False)],
+                [self._call("OldTool", "2026-05-16T11:59:59Z")],
             ),
             self._session(
                 "no-time",
                 None,
-                [ToolCall("NoTimeTool", "", False)],
+                [self._call("NoTimeTool", "")],
             ),
             SessionResult(
                 path="skipped",
@@ -76,7 +76,7 @@ class CountCallsTests(unittest.TestCase):
                 status="skipped",
                 skip_reason="unknown format version",
                 versions_seen=["3.0.1"],
-                tool_calls=[ToolCall("SkippedTool", "2026-06-15T12:00:00Z", False)],
+                tool_calls=[self._call("SkippedTool", "2026-06-15T12:00:00Z")],
                 first_ts="2026-06-15T12:00:00Z",
                 last_ts="2026-06-15T12:00:00Z",
             ),
@@ -99,17 +99,17 @@ class CountCallsTests(unittest.TestCase):
             self._session(
                 "parent",
                 "2026-06-14T12:00:00Z",
-                [ToolCall("ParentTool", "2026-06-14T12:00:00Z", False)],
+                [self._call("ParentTool", "2026-06-14T12:00:00Z")],
             ),
             self._session(
                 "subagent",
                 "2026-06-14T13:00:00Z",
-                [ToolCall("SubagentTool", "2026-06-14T13:00:00Z", True)],
+                [self._call("SubagentTool", "2026-06-14T13:00:00Z", True)],
             ),
             self._session(
                 "older",
                 "2026-06-13T12:00:00Z",
-                [ToolCall("OlderTool", "2026-06-13T12:00:00Z", False)],
+                [self._call("OlderTool", "2026-06-13T12:00:00Z")],
             ),
         ]
 
@@ -130,17 +130,17 @@ class CountCallsTests(unittest.TestCase):
             self._session(
                 "future-parent",
                 "2026-06-15T12:06:00Z",
-                [ToolCall("Future", "2026-06-15T12:06:00Z", False)],
+                [self._call("Future", "2026-06-15T12:06:00Z")],
             ),
             self._session(
                 "future-child",
                 "2026-06-15T13:00:00Z",
-                [ToolCall("FutureChild", "2026-06-15T13:00:00Z", False)],
+                [self._call("FutureChild", "2026-06-15T13:00:00Z")],
             ),
             self._session(
                 "current",
                 "2026-06-15T12:00:00Z",
-                [ToolCall("Current", "2026-06-15T12:00:00Z", False)],
+                [self._call("Current", "2026-06-15T12:00:00Z")],
             ),
         ]
 
@@ -156,6 +156,40 @@ class CountCallsTests(unittest.TestCase):
         self.assertEqual(usage.sessions_considered, 1)
         self.assertEqual(usage.counts, {"Current": 1})
 
+    def test_mcp_attribution_is_aggregated_from_tool_calls(self) -> None:
+        sessions = [
+            self._session(
+                "current",
+                "2026-06-15T12:00:00Z",
+                [
+                    self._mcp_call(
+                        "mcp__github__get_pr",
+                        "github",
+                        "get_pr",
+                        "2026-06-15T12:00:00Z",
+                    ),
+                    ToolCall(
+                        raw="mcp__broken",
+                        kind="mcp-unattributed",
+                        server=None,
+                        tool=None,
+                        timestamp="2026-06-15T12:00:01Z",
+                    ),
+                ],
+            )
+        ]
+
+        usage = count_calls(
+            sessions,
+            [session.path for session in sessions],
+            window_sessions=30,
+            window_days=30,
+            now=NOW,
+        )
+
+        self.assertEqual(usage.server_tool_counts, {"github": {"get_pr": 1}})
+        self.assertEqual(usage.unattributed_mcp_calls, 1)
+
     def _session(
         self, path: str, last_ts: str | None, calls: list[ToolCall]
     ) -> SessionResult:
@@ -168,6 +202,29 @@ class CountCallsTests(unittest.TestCase):
             tool_calls=calls,
             first_ts=last_ts,
             last_ts=last_ts,
+        )
+
+    def _call(
+        self, raw: str, timestamp: str, sidechain: bool = False
+    ) -> ToolCall:
+        return ToolCall(
+            raw=raw,
+            kind="builtin",
+            server=None,
+            tool=None,
+            timestamp=timestamp,
+            sidechain=sidechain,
+        )
+
+    def _mcp_call(
+        self, raw: str, server: str, tool: str, timestamp: str
+    ) -> ToolCall:
+        return ToolCall(
+            raw=raw,
+            kind="mcp",
+            server=server,
+            tool=tool,
+            timestamp=timestamp,
         )
 
 

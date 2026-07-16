@@ -13,6 +13,7 @@ import time
 from dataclasses import dataclass
 from typing import IO, Any
 
+from mcp_top import __version__
 from mcp_top.config import ServerConfig
 
 
@@ -33,7 +34,7 @@ def list_server_tools(cfg: ServerConfig, timeout: float = 20.0) -> ServerTools:
         return ServerTools(
             server=cfg.name,
             status="unsupported",
-            error="unsupported transport (v0.1 queries stdio only)",
+            error="unsupported transport (this version queries stdio only)",
             tools=[],
         )
     if cfg.command is None:
@@ -86,7 +87,7 @@ def list_server_tools(cfg: ServerConfig, timeout: float = 20.0) -> ServerTools:
                 "params": {
                     "protocolVersion": "2025-06-18",
                     "capabilities": {},
-                    "clientInfo": {"name": "mcp-top", "version": "0.1.0"},
+                    "clientInfo": {"name": "mcp-top", "version": __version__},
                 },
             },
         )

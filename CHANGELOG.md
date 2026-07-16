@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog.
 
+## [0.2.0] - unreleased
+
+### Changed
+
+- Raised the Python floor to 3.11+.
+- Refactored reports around a per-CLI architecture while keeping Claude Code as the only wired CLI in this batch.
+- Made usage nullable with an explicit `usage_status`.
+- Changed JSON output to breaking schema `mcp-top/v2` with nested per-CLI results.
+- Added the `unknown` verdict for unsupported usage.
+
 ## [0.1.0] - 2026-07-16
 
 ### Added

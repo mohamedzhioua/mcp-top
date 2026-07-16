@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
-from mcp_top.adapters.claude_code import SessionResult, parse_timestamp
+from mcp_top.transcripts import SessionResult, parse_timestamp
 
 
 @dataclass
@@ -17,6 +17,8 @@ class UsageWindow:
     window_days: int
     counts: dict[str, int]
     sidechain_counts: dict[str, int]
+    server_tool_counts: dict[str, dict[str, int]] = field(default_factory=dict)
+    unattributed_mcp_calls: int = 0
     future_sessions: int = 0
 
 
@@ -65,14 +67,29 @@ def count_calls(
 
     counts: dict[str, int] = {}
     sidechain_counts: dict[str, int] = {}
+    server_tool_counts: dict[str, dict[str, int]] = {}
+    unattributed_mcp_calls = 0
     for _, files in included_groups:
         for _, session in files:
             for call in session.tool_calls:
-                counts[call.tool] = counts.get(call.tool, 0) + 1
+                counts[call.raw] = counts.get(call.raw, 0) + 1
                 if call.sidechain:
-                    sidechain_counts[call.tool] = (
-                        sidechain_counts.get(call.tool, 0) + 1
+                    sidechain_counts[call.raw] = (
+                        sidechain_counts.get(call.raw, 0) + 1
                     )
+                if (
+                    call.kind == "mcp"
+                    and call.server is not None
+                    and call.tool is not None
+                ):
+                    called_tools = server_tool_counts.setdefault(
+                        call.server, {}
+                    )
+                    called_tools[call.tool] = (
+                        called_tools.get(call.tool, 0) + 1
+                    )
+                elif call.kind == "mcp-unattributed":
+                    unattributed_mcp_calls += 1
 
     return UsageWindow(
         sessions_considered=len(included_groups),
@@ -80,5 +97,7 @@ def count_calls(
         window_days=window_days,
         counts=counts,
         sidechain_counts=sidechain_counts,
+        server_tool_counts=server_tool_counts,
+        unattributed_mcp_calls=unattributed_mcp_calls,
         future_sessions=future_sessions,
     )
