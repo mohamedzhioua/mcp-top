@@ -1,5 +1,7 @@
 """Unit tests for token estimate formatting."""
 
+from __future__ import annotations
+
 import json
 import math
 import unittest

@@ -90,7 +90,7 @@ def _read_json_object(path: str, warnings: list[str]) -> dict[str, Any] | None:
     try:
         with open(path, "r", encoding="utf-8") as handle:
             data = json.load(handle)
-    except json.JSONDecodeError as err:
+    except (json.JSONDecodeError, UnicodeError) as err:
         warnings.append(f"could not parse {path}: {err}")
         return None
     except OSError as err:

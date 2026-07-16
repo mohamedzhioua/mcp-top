@@ -1,5 +1,7 @@
 """End-to-end tests for JSON, human, and no-query CLI modes."""
 
+from __future__ import annotations
+
 import contextlib
 import io
 import json

@@ -11,7 +11,7 @@ import subprocess
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any, TextIO
+from typing import IO, Any
 
 from mcp_top.config import ServerConfig
 
@@ -44,7 +44,7 @@ def list_server_tools(cfg: ServerConfig, timeout: float = 20.0) -> ServerTools:
             tools=[],
         )
 
-    process: subprocess.Popen[str] | None = None
+    process: subprocess.Popen[bytes] | None = None
     reader: threading.Thread | None = None
     messages: queue.Queue[tuple[str, Any]] = queue.Queue()
     deadline = time.monotonic() + timeout
@@ -62,8 +62,6 @@ def list_server_tools(cfg: ServerConfig, timeout: float = 20.0) -> ServerTools:
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             env={**os.environ, **cfg.env},
-            text=True,
-            encoding="utf-8",
             **popen_kwargs,
         )
         if process.stdin is None or process.stdout is None:
@@ -155,19 +153,30 @@ def list_server_tools(cfg: ServerConfig, timeout: float = 20.0) -> ServerTools:
                 reader.join(timeout=2)
             except RuntimeError:
                 pass
+        if process is not None and (reader is None or not reader.is_alive()):
+            # Safe only once no thread can be blocked on the stream.
+            if process.stdout is not None:
+                try:
+                    process.stdout.close()
+                except Exception:
+                    pass
 
 
-def _send(stream: TextIO, message: dict[str, Any]) -> None:
-    stream.write(json.dumps(message, separators=(",", ":")) + "\n")
+def _send(stream: IO[bytes], message: dict[str, Any]) -> None:
+    # Binary pipes keep JSON-RPC frames LF-terminated on every platform;
+    # text mode would rewrite "\n" to os.linesep on Windows.
+    stream.write(
+        (json.dumps(message, separators=(",", ":")) + "\n").encode("utf-8")
+    )
     stream.flush()
 
 
 def _read_stdout(
-    stream: TextIO, messages: queue.Queue[tuple[str, Any]]
+    stream: IO[bytes], messages: queue.Queue[tuple[str, Any]]
 ) -> None:
     try:
-        for line in stream:
-            messages.put(("line", line))
+        for raw in stream:
+            messages.put(("line", raw.decode("utf-8", "replace")))
     except Exception as err:
         messages.put(("error", err))
     finally:
@@ -208,7 +217,7 @@ def _wait_for_response(
         return message
 
 
-def _stop_process(process: subprocess.Popen[str]) -> None:
+def _stop_process(process: subprocess.Popen[bytes]) -> None:
     """Stop the server and its whole process tree.
 
     Wrapper commands (npx.cmd, launcher scripts) spawn grandchildren that
@@ -235,12 +244,12 @@ def _stop_process(process: subprocess.Popen[str]) -> None:
             try:
                 process.wait(timeout=2)
             except subprocess.TimeoutExpired:
-                process.kill()
+                _kill_hard(process)
                 process.wait(timeout=2)
     except Exception:
         try:
             if process.poll() is None:
-                process.kill()
+                _kill_hard(process)
                 process.wait(timeout=2)
         except Exception:
             pass
@@ -250,3 +259,15 @@ def _stop_process(process: subprocess.Popen[str]) -> None:
                 process.stdin.close()
             except Exception:
                 pass
+
+
+def _kill_hard(process: subprocess.Popen[bytes]) -> None:
+    """Last-resort kill that still targets the whole tree where possible."""
+
+    if os.name != "nt":
+        try:
+            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+            return
+        except (OSError, PermissionError):
+            pass
+    process.kill()

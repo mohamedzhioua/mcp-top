@@ -113,7 +113,7 @@ def build_report(
     severity = {"prune": 0, "review": 1, "keep": 2, "unknown": 3}
     rows.sort(
         key=lambda row: (
-            severity[row.verdict],
+            severity.get(row.verdict, len(severity)),
             -(row.def_tokens.tokens if row.def_tokens is not None else 0),
             row.server,
         )
@@ -137,7 +137,7 @@ def _definition_tokens(result: ServerTools) -> TokenCount | None:
     estimates = [estimate_tool_definition(tool) for tool in result.tools]
     return TokenCount(
         tokens=sum(estimate.tokens for estimate in estimates),
-        exact=all(estimate.exact for estimate in estimates),
+        exact=bool(estimates) and all(estimate.exact for estimate in estimates),
     )
 
 

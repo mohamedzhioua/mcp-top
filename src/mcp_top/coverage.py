@@ -23,6 +23,8 @@ class Coverage:
     servers_queried_ok: int
     servers_query_failed: list[tuple[str, str]]
     config_warnings: list[str]
+    parsed_without_timestamp: int = 0
+    bad_lines_in_parsed: int = 0
 
 
 def build_coverage(
@@ -61,6 +63,16 @@ def build_coverage(
         ),
         servers_query_failed=query_failures,
         config_warnings=list(config_warnings or []),
+        parsed_without_timestamp=sum(
+            1
+            for session in sessions
+            if session.status == "parsed" and session.last_ts is None
+        ),
+        bad_lines_in_parsed=sum(
+            session.bad_lines
+            for session in sessions
+            if session.status == "parsed"
+        ),
     )
 
 
@@ -78,6 +90,16 @@ def render_coverage_text(cov: Coverage) -> str:
         f"server queries: {cov.servers_queried_ok} ok, "
         f"{len(cov.servers_query_failed)} failed"
     ]
+    if cov.parsed_without_timestamp:
+        lines.append(
+            f"  {cov.parsed_without_timestamp} parsed transcript(s) had no "
+            "usable timestamp and were excluded from the window"
+        )
+    if cov.bad_lines_in_parsed:
+        lines.append(
+            f"  {cov.bad_lines_in_parsed} line(s) were unparseable across "
+            "parsed transcripts and are not counted"
+        )
     for path, reason in cov.transcripts_skipped:
         lines.append(f"  skipped {_shorten_transcript_path(path)}: {reason}")
     for server, error in cov.servers_query_failed:

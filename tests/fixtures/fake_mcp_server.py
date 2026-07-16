@@ -76,8 +76,27 @@ def sleep_forever(pid_path: str) -> None:
     time.sleep(60)
 
 
+def sleep_with_grandchild(pid_path: str, grandchild_pid_path: str) -> None:
+    """Spawn a grandchild that inherits stdio, then hang.
+
+    Used to prove cleanup kills the whole process tree, not just the
+    direct child.
+    """
+
+    import subprocess
+
+    child = subprocess.Popen(
+        [sys.executable, os.path.abspath(__file__), "sleep", grandchild_pid_path]
+    )
+    with open(pid_path, "w", encoding="utf-8") as handle:
+        handle.write(str(os.getpid()))
+    child.wait()
+
+
 if __name__ == "__main__":
     if sys.argv[1] == "serve":
         serve()
+    elif sys.argv[1] == "sleep-with-grandchild":
+        sleep_with_grandchild(sys.argv[2], sys.argv[3])
     else:
         sleep_forever(sys.argv[2])

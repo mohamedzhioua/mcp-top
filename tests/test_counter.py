@@ -1,5 +1,7 @@
 """Unit tests for windowed transcript tool-call counts."""
 
+from __future__ import annotations
+
 from datetime import datetime, timezone
 import unittest
 
