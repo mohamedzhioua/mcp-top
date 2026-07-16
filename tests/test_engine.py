@@ -1,5 +1,7 @@
 """Golden tests for joining, ranking, and verdict assignment."""
 
+from __future__ import annotations
+
 import unittest
 
 import _path  # noqa: F401

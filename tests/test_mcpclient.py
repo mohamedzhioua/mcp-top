@@ -1,9 +1,12 @@
 """Integration tests for the MCP newline-delimited stdio client."""
 
+from __future__ import annotations
+
 import ctypes
 import os
 import sys
 import tempfile
+import time
 import unittest
 
 import _path  # noqa: F401
@@ -64,6 +67,38 @@ class McpClientTests(unittest.TestCase):
             with open(pid_path, "r", encoding="utf-8") as handle:
                 pid = int(handle.read())
             self.assertFalse(self._process_exists(pid))
+
+    def test_timeout_stops_grandchild_process_tree(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            pid_path = os.path.join(directory, "server.pid")
+            grandchild_pid_path = os.path.join(directory, "grandchild.pid")
+            config = self._config(
+                sys.executable,
+                [
+                    FAKE_SERVER,
+                    "sleep-with-grandchild",
+                    pid_path,
+                    grandchild_pid_path,
+                ],
+            )
+
+            result = list_server_tools(config, timeout=3)
+
+            self.assertEqual(result.status, "error")
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                if os.path.exists(grandchild_pid_path):
+                    break
+                time.sleep(0.1)
+            with open(grandchild_pid_path, "r", encoding="utf-8") as handle:
+                grandchild_pid = int(handle.read())
+            # Reaping the whole tree may take a moment after the kill.
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                if not self._process_exists(grandchild_pid):
+                    break
+                time.sleep(0.2)
+            self.assertFalse(self._process_exists(grandchild_pid))
 
     def _config(
         self, command: str | None, args: list[str], transport: str = "stdio"
