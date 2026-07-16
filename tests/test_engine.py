@@ -19,12 +19,14 @@ class EngineTests(unittest.TestCase):
             self._server("beta_review"),
             self._server("gamma_keep"),
             self._server("delta_error"),
+            self._server("a__b"),
         ]
         definitions = [
             self._tools("alpha_prune", 3),
             self._tools("beta_review", 2),
             self._tools("gamma_keep", 4),
             ServerTools("delta_error", "error", "query failed", []),
+            self._tools("a__b", 1),
         ]
         window = UsageWindow(
             sessions_considered=2,
@@ -35,6 +37,8 @@ class EngineTests(unittest.TestCase):
                 "mcp__gamma_keep__search": 6,
                 "mcp__gamma_keep__fetch": 4,
                 "mcp__rogue__surprise": 1,
+                "mcp__a__b__complex": 2,
+                "mcp__unattributed": 3,
                 "Read": 7,
             },
             sidechain_counts={},
@@ -47,6 +51,7 @@ class EngineTests(unittest.TestCase):
             [
                 "alpha_prune",
                 "beta_review",
+                "a__b",
                 "delta_error",
                 "rogue",
                 "gamma_keep",
@@ -60,8 +65,11 @@ class EngineTests(unittest.TestCase):
         self.assertIsNone(rows["delta_error"].def_tokens)
         self.assertEqual(rows["rogue"].scope, "(not configured)")
         self.assertEqual(rows["rogue"].called_tools, {"surprise": 1})
-        self.assertEqual(report.coverage.total_tool_calls, 20)
-        self.assertEqual(report.coverage.mcp_tool_calls, 13)
+        self.assertEqual(rows["a__b"].called_tools, {"complex": 2})
+        self.assertEqual(report.coverage.total_tool_calls, 25)
+        self.assertEqual(report.coverage.mcp_tool_calls, 15)
+        self.assertEqual(report.coverage.unattributed_mcp_calls, 3)
+        self.assertEqual(report.coverage.servers_unsupported, 0)
 
     def _server(self, name: str) -> ServerConfig:
         return ServerConfig(

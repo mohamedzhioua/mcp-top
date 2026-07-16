@@ -6,6 +6,7 @@ import json
 import os
 import tempfile
 import unittest
+from unittest import mock
 
 import _path  # noqa: F401
 
@@ -74,7 +75,7 @@ class DiscoverServersTests(unittest.TestCase):
         self.assertTrue(any("shared" in warning for warning in warnings))
         self.assertTrue(any("overrides" in warning for warning in warnings))
 
-    def test_user_project_scope_path_matching_normalizes_case_and_slashes(self) -> None:
+    def test_user_project_scope_path_matching_depends_on_platform_case_rules(self) -> None:
         with tempfile.TemporaryDirectory() as home:
             project_dir = os.path.join(home, "CaseProject")
             os.mkdir(project_dir)
@@ -98,11 +99,79 @@ class DiscoverServersTests(unittest.TestCase):
             servers, warnings = discover_servers(home, project_dir)
 
         self.assertEqual(warnings, [])
-        self.assertEqual(len(servers), 1)
-        self.assertEqual(servers[0].name, "projectish")
-        self.assertEqual(servers[0].scope, "user-project")
-        self.assertEqual(servers[0].transport, "sse")
-        self.assertEqual(servers[0].url, "https://example.com/events")
+        if os.name == "nt":
+            self.assertEqual(len(servers), 1)
+            self.assertEqual(servers[0].name, "projectish")
+            self.assertEqual(servers[0].scope, "user-project")
+        else:
+            self.assertEqual(servers, [])
+
+    def test_user_project_scope_path_matching_normalizes_slashes(self) -> None:
+        with tempfile.TemporaryDirectory() as home:
+            project_dir = os.path.join(home, "project")
+            os.mkdir(project_dir)
+            if os.name == "nt":
+                configured_path = project_dir.replace("\\", "/")
+            else:
+                configured_path = project_dir.replace("/", "\\")
+            self._write_json(
+                os.path.join(home, ".claude.json"),
+                {
+                    "projects": {
+                        configured_path: {
+                            "mcpServers": {"projectish": {"command": "run"}}
+                        }
+                    }
+                },
+            )
+
+            servers, warnings = discover_servers(home, project_dir)
+
+        self.assertEqual(warnings, [])
+        self.assertEqual([server.name for server in servers], ["projectish"])
+
+    def test_non_object_config_shapes_emit_warnings(self) -> None:
+        with tempfile.TemporaryDirectory() as home:
+            self._write_json(os.path.join(home, ".claude.json"), [])
+            project_dir = os.path.join(home, "project")
+            os.mkdir(project_dir)
+            project_path = os.path.join(project_dir, ".mcp.json")
+            self._write_json(
+                project_path,
+                {"mcpServers": {"bad-server": "not-an-object"}},
+            )
+
+            servers, warnings = discover_servers(home, project_dir)
+
+        self.assertEqual(servers, [])
+        self.assertIn(
+            f"{os.path.join(home, '.claude.json')}: config root is not an object",
+            warnings,
+        )
+        self.assertIn(
+            f"{project_path}: server 'bad-server' spec is not an object",
+            warnings,
+        )
+
+    def test_mcp_servers_non_object_and_recursion_error_emit_warnings(self) -> None:
+        with tempfile.TemporaryDirectory() as home:
+            user_path = os.path.join(home, ".claude.json")
+            self._write_json(user_path, {"mcpServers": []})
+
+            servers, warnings = discover_servers(home, None)
+
+            self.assertEqual(servers, [])
+            self.assertEqual(
+                warnings, [f"{user_path}: mcpServers is not an object"]
+            )
+
+            with mock.patch(
+                "mcp_top.config.json.load", side_effect=RecursionError("deep")
+            ):
+                servers, warnings = discover_servers(home, None)
+
+        self.assertEqual(servers, [])
+        self.assertEqual(warnings, [f"could not parse {user_path}: deep"])
 
     def test_malformed_project_config_warns_and_keeps_user_scope(self) -> None:
         with tempfile.TemporaryDirectory() as home:

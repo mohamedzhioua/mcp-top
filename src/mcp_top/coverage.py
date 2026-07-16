@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from typing import Collection
 
 from mcp_top.adapters.claude_code import SessionResult
 from mcp_top.counter import UsageWindow
 from mcp_top.mcpclient import ServerTools
+from mcp_top.names import parse_mcp_tool_name
 
 
 @dataclass
@@ -25,6 +27,10 @@ class Coverage:
     config_warnings: list[str]
     parsed_without_timestamp: int = 0
     bad_lines_in_parsed: int = 0
+    future_sessions: int = 0
+    duplicate_tool_use: int = 0
+    unattributed_mcp_calls: int = 0
+    servers_unsupported: int = 0
 
 
 def build_coverage(
@@ -32,6 +38,7 @@ def build_coverage(
     window: UsageWindow,
     server_tools_list: list[ServerTools],
     config_warnings: list[str] | None = None,
+    configured_names: Collection[str] | None = None,
 ) -> Coverage:
     """Build coverage facts from parsed sessions and server query results."""
 
@@ -45,6 +52,14 @@ def build_coverage(
         for result in server_tools_list
         if result.status == "error"
     ]
+    mcp_tool_calls = 0
+    unattributed_mcp_calls = 0
+    for tool, count in window.counts.items():
+        parsed = parse_mcp_tool_name(tool, configured_names)
+        if parsed is not None:
+            mcp_tool_calls += count
+        elif tool.startswith("mcp__"):
+            unattributed_mcp_calls += count
     return Coverage(
         transcripts_found=len(sessions),
         transcripts_parsed=sum(
@@ -53,11 +68,7 @@ def build_coverage(
         transcripts_skipped=skipped,
         in_window=window.sessions_considered,
         total_tool_calls=sum(window.counts.values()),
-        mcp_tool_calls=sum(
-            count
-            for tool, count in window.counts.items()
-            if tool.startswith("mcp__")
-        ),
+        mcp_tool_calls=mcp_tool_calls,
         servers_queried_ok=sum(
             1 for result in server_tools_list if result.status == "ok"
         ),
@@ -72,6 +83,16 @@ def build_coverage(
             session.bad_lines
             for session in sessions
             if session.status == "parsed"
+        ),
+        future_sessions=window.future_sessions,
+        duplicate_tool_use=sum(
+            session.duplicate_tool_use
+            for session in sessions
+            if session.status == "parsed"
+        ),
+        unattributed_mcp_calls=unattributed_mcp_calls,
+        servers_unsupported=sum(
+            1 for result in server_tools_list if result.status == "unsupported"
         ),
     )
 
@@ -88,7 +109,8 @@ def render_coverage_text(cov: Coverage) -> str:
         f"{cov.total_tool_calls} tool calls "
         f"({cov.mcp_tool_calls} MCP); "
         f"server queries: {cov.servers_queried_ok} ok, "
-        f"{len(cov.servers_query_failed)} failed"
+        f"{len(cov.servers_query_failed)} failed, "
+        f"{cov.servers_unsupported} not queried"
     ]
     if cov.parsed_without_timestamp:
         lines.append(
@@ -99,6 +121,21 @@ def render_coverage_text(cov: Coverage) -> str:
         lines.append(
             f"  {cov.bad_lines_in_parsed} line(s) were unparseable across "
             "parsed transcripts and are not counted"
+        )
+    if cov.future_sessions:
+        lines.append(
+            f"  {cov.future_sessions} transcript group(s) had future-dated "
+            "timestamps and were excluded from the window"
+        )
+    if cov.duplicate_tool_use:
+        lines.append(
+            f"  {cov.duplicate_tool_use} duplicate tool_use block(s) were "
+            "excluded from call counts"
+        )
+    if cov.unattributed_mcp_calls:
+        lines.append(
+            f"  {cov.unattributed_mcp_calls} MCP-prefixed call(s) could not "
+            "be attributed to a server"
         )
     for path, reason in cov.transcripts_skipped:
         lines.append(f"  skipped {_shorten_transcript_path(path)}: {reason}")

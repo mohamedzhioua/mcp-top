@@ -53,7 +53,10 @@ def list_server_tools(cfg: ServerConfig, timeout: float = 20.0) -> ServerTools:
         if os.name == "nt":
             command = shutil.which(command) or command
         popen_kwargs: dict[str, Any] = {}
-        if os.name != "nt":
+        if os.name == "nt":
+            # Let CTRL_BREAK stop the whole tree when taskkill is unavailable.
+            popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        else:
             # Own process group so cleanup can kill the whole server tree.
             popen_kwargs["start_new_session"] = True
         process = subprocess.Popen(
@@ -230,12 +233,18 @@ def _stop_process(process: subprocess.Popen[bytes]) -> None:
     try:
         if process.poll() is None:
             if os.name == "nt":
-                subprocess.run(
-                    ["taskkill", "/F", "/T", "/PID", str(process.pid)],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    timeout=5,
-                )
+                try:
+                    process.send_signal(signal.CTRL_BREAK_EVENT)
+                    process.wait(timeout=1)
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+                if process.poll() is None:
+                    subprocess.run(
+                        ["taskkill", "/F", "/T", "/PID", str(process.pid)],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        timeout=5,
+                    )
             else:
                 try:
                     os.killpg(os.getpgid(process.pid), signal.SIGTERM)

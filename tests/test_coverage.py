@@ -30,6 +30,10 @@ class CoverageTests(unittest.TestCase):
             servers_queried_ok=1,
             servers_query_failed=[("broken", "timeout")],
             config_warnings=["invalid project config"],
+            future_sessions=1,
+            duplicate_tool_use=2,
+            unattributed_mcp_calls=3,
+            servers_unsupported=4,
         )
 
         rendered = render_coverage_text(coverage)
@@ -47,6 +51,20 @@ class CoverageTests(unittest.TestCase):
         )
         self.assertIn("server query failed broken: timeout", rendered)
         self.assertIn("config warning: invalid project config", rendered)
+        self.assertIn("server queries: 1 ok, 1 failed, 4 not queried", rendered)
+        self.assertIn(
+            "1 transcript group(s) had future-dated timestamps and were "
+            "excluded from the window",
+            rendered,
+        )
+        self.assertIn(
+            "2 duplicate tool_use block(s) were excluded from call counts",
+            rendered,
+        )
+        self.assertIn(
+            "3 MCP-prefixed call(s) could not be attributed to a server",
+            rendered,
+        )
 
     def test_render_surfaces_partial_parse_and_windowing_gaps(self) -> None:
         coverage = Coverage(

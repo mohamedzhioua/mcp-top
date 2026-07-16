@@ -96,6 +96,32 @@ class CliTests(unittest.TestCase):
         self.assertEqual(server["def_error"], "skipped by --no-query")
         self.assertIsNone(server["def_tokens"])
 
+    def test_human_output_explains_unavailable_definitions(self) -> None:
+        exit_code, output = self._run("--no-query")
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn(
+            "  github: definitions unavailable — skipped by --no-query",
+            output,
+        )
+
+    def test_zero_sessions_is_argparse_usage_error(self) -> None:
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            with self.assertRaises(SystemExit) as raised:
+                cli.main(["--sessions", "0"])
+
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn("usage: mcp-top", stderr.getvalue())
+
+    def test_days_and_timeout_reject_nonpositive_values(self) -> None:
+        for option, value in (("--days", "0"), ("--timeout", "0")):
+            with self.subTest(option=option):
+                with contextlib.redirect_stderr(io.StringIO()):
+                    with self.assertRaises(SystemExit) as raised:
+                        cli.main([option, value])
+                self.assertEqual(raised.exception.code, 2)
+
     def _run(self, *extra: str) -> tuple[int, str]:
         output = io.StringIO()
         args = [
