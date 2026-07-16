@@ -1,0 +1,2 @@
+{"type":"ai-title","title":"No version here"}
+{"type":"assistant","timestamp":"2026-06-13T09:00:00Z","sessionId":"55555555-5555-5555-5555-555555555555","isSidechain":false,"message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_301","name":"Bash","input":{"command":"pwd"}}]}}

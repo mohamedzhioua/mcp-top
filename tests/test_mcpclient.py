@@ -1,0 +1,114 @@
+"""Integration tests for the MCP newline-delimited stdio client."""
+
+import ctypes
+import os
+import sys
+import tempfile
+import unittest
+
+import _path  # noqa: F401
+
+from mcp_top.config import ServerConfig
+from mcp_top.mcpclient import list_server_tools
+
+
+FAKE_SERVER = os.path.join(os.path.dirname(__file__), "fixtures", "fake_mcp_server.py")
+
+
+class McpClientTests(unittest.TestCase):
+    """Exercises successful, unsupported, missing, and timed-out servers."""
+
+    def test_lists_tools_across_paginated_responses(self) -> None:
+        config = self._config(sys.executable, [FAKE_SERVER, "serve"])
+
+        result = list_server_tools(config, timeout=5)
+
+        self.assertEqual(result.server, "fake")
+        self.assertEqual(result.status, "ok")
+        self.assertIsNone(result.error)
+        self.assertEqual(
+            [tool["name"] for tool in result.tools], ["first_tool", "second_tool"]
+        )
+
+    def test_http_transport_is_explicitly_unsupported(self) -> None:
+        config = self._config(None, [], transport="http")
+
+        result = list_server_tools(config)
+
+        self.assertEqual(result.status, "unsupported")
+        self.assertEqual(
+            result.error, "unsupported transport (v0.1 queries stdio only)"
+        )
+        self.assertEqual(result.tools, [])
+
+    def test_missing_command_returns_error(self) -> None:
+        config = self._config("mcp-top-command-that-does-not-exist", [])
+
+        result = list_server_tools(config, timeout=2)
+
+        self.assertEqual(result.status, "error")
+        self.assertIsNotNone(result.error)
+        self.assertEqual(result.tools, [])
+
+    def test_timeout_returns_error_and_stops_child(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            pid_path = os.path.join(directory, "server.pid")
+            config = self._config(
+                sys.executable, [FAKE_SERVER, "sleep", pid_path]
+            )
+
+            result = list_server_tools(config, timeout=2)
+
+            self.assertEqual(result.status, "error")
+            self.assertIn("timeout", result.error.lower())
+            with open(pid_path, "r", encoding="utf-8") as handle:
+                pid = int(handle.read())
+            self.assertFalse(self._process_exists(pid))
+
+    def _config(
+        self, command: str | None, args: list[str], transport: str = "stdio"
+    ) -> ServerConfig:
+        return ServerConfig(
+            name="fake",
+            scope="user",
+            source_path="test",
+            transport=transport,
+            command=command,
+            args=args,
+            env={},
+            url="https://example.com/mcp" if transport != "stdio" else None,
+        )
+
+    def _process_exists(self, pid: int) -> bool:
+        if os.name == "nt":
+            from ctypes import wintypes
+
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.OpenProcess.argtypes = [
+                wintypes.DWORD,
+                wintypes.BOOL,
+                wintypes.DWORD,
+            ]
+            kernel32.OpenProcess.restype = wintypes.HANDLE
+            kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+            kernel32.WaitForSingleObject.restype = wintypes.DWORD
+            kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+            kernel32.CloseHandle.restype = wintypes.BOOL
+            synchronize = 0x00100000
+            handle = kernel32.OpenProcess(synchronize, False, pid)
+            if not handle:
+                return False
+            try:
+                wait_timeout = 0x00000102
+                return kernel32.WaitForSingleObject(handle, 0) == wait_timeout
+            finally:
+                kernel32.CloseHandle(handle)
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return False
+        return True
+
+
+if __name__ == "__main__":
+    unittest.main()
