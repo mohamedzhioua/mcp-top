@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-from mcp_top.adapters.claude_code import SessionResult
+from mcp_top.adapters.claude_code import SessionResult, parse_timestamp
 
 
 @dataclass
@@ -17,10 +17,12 @@ class UsageWindow:
     window_days: int
     counts: dict[str, int]
     sidechain_counts: dict[str, int]
+    future_sessions: int = 0
 
 
 def count_calls(
     sessions: list[SessionResult],
+    keys: list[str],
     window_sessions: int = 30,
     window_days: int = 30,
     now: datetime | None = None,
@@ -33,47 +35,50 @@ def count_calls(
     else:
         current_time = current_time.astimezone(timezone.utc)
 
-    dated_sessions: list[tuple[datetime, SessionResult]] = []
-    for session in sessions:
+    if len(sessions) != len(keys):
+        raise ValueError("sessions and keys must have the same length")
+
+    grouped: dict[str, list[tuple[datetime, SessionResult]]] = {}
+    for session, key in zip(sessions, keys):
         if session.status != "parsed" or session.last_ts is None:
             continue
-        timestamp = _parse_timestamp(session.last_ts)
+        timestamp = parse_timestamp(session.last_ts)
         if timestamp is not None:
-            dated_sessions.append((timestamp, session))
+            grouped.setdefault(key, []).append((timestamp, session))
 
-    dated_sessions.sort(key=lambda item: item[0], reverse=True)
-    capped_sessions = dated_sessions[: max(0, window_sessions)]
-    cutoff = current_time - timedelta(days=window_days)
-    included = [
-        session
-        for timestamp, session in capped_sessions
-        if cutoff <= timestamp <= current_time
+    dated_groups = [
+        (max(timestamp for timestamp, _ in files), files)
+        for files in grouped.values()
     ]
+    future_limit = current_time + timedelta(minutes=5)
+    future_sessions = sum(
+        1 for timestamp, _ in dated_groups if timestamp > future_limit
+    )
+    cutoff = current_time - timedelta(days=window_days)
+    eligible_groups = [
+        (timestamp, files)
+        for timestamp, files in dated_groups
+        if cutoff <= timestamp <= future_limit
+    ]
+    eligible_groups.sort(key=lambda item: item[0], reverse=True)
+    included_groups = eligible_groups[:window_sessions]
 
     counts: dict[str, int] = {}
     sidechain_counts: dict[str, int] = {}
-    for session in included:
-        for call in session.tool_calls:
-            counts[call.tool] = counts.get(call.tool, 0) + 1
-            if call.sidechain:
-                sidechain_counts[call.tool] = sidechain_counts.get(call.tool, 0) + 1
+    for _, files in included_groups:
+        for _, session in files:
+            for call in session.tool_calls:
+                counts[call.tool] = counts.get(call.tool, 0) + 1
+                if call.sidechain:
+                    sidechain_counts[call.tool] = (
+                        sidechain_counts.get(call.tool, 0) + 1
+                    )
 
     return UsageWindow(
-        sessions_considered=len(included),
+        sessions_considered=len(included_groups),
         window_sessions=window_sessions,
         window_days=window_days,
         counts=counts,
         sidechain_counts=sidechain_counts,
+        future_sessions=future_sessions,
     )
-
-
-def _parse_timestamp(value: str) -> datetime | None:
-    if value.endswith("Z"):
-        value = value[:-1] + "+00:00"
-    try:
-        parsed = datetime.fromisoformat(value)
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)

@@ -9,7 +9,11 @@ import sys
 from dataclasses import asdict
 
 from mcp_top import __version__
-from mcp_top.adapters.claude_code import find_transcripts, parse_session
+from mcp_top.adapters.claude_code import (
+    find_transcripts,
+    parse_session,
+    session_key,
+)
 from mcp_top.config import ServerConfig, discover_servers
 from mcp_top.counter import count_calls
 from mcp_top.coverage import render_coverage_text
@@ -19,7 +23,7 @@ from mcp_top.tokens import fmt
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Run mcp-top, returning 2 only for an unexpected internal failure."""
+    """Run mcp-top, returning 2 for invalid usage or an internal failure."""
 
     parser = _parser()
     args = parser.parse_args(argv)
@@ -42,9 +46,9 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--home", default=os.path.expanduser("~"))
     parser.add_argument("--project", default=os.getcwd())
-    parser.add_argument("--sessions", type=int, default=30)
-    parser.add_argument("--days", type=int, default=30)
-    parser.add_argument("--timeout", type=float, default=20.0)
+    parser.add_argument("--sessions", type=_positive_int, default=30)
+    parser.add_argument("--days", type=_positive_int, default=30)
+    parser.add_argument("--timeout", type=_positive_float, default=20.0)
     parser.add_argument(
         "--no-query",
         action="store_true",
@@ -67,6 +71,7 @@ def _build(args: argparse.Namespace) -> Report:
     sessions = [parse_session(path) for path in paths]
     window = count_calls(
         sessions,
+        [session_key(path, args.home) for path in paths],
         window_sessions=args.sessions,
         window_days=args.days,
     )
@@ -168,6 +173,12 @@ def _render_human(report: Report) -> str:
     table_lines = [_format_table_row(headers, widths)]
     table_lines.append("  ".join("-" * width for width in widths))
     table_lines.extend(_format_table_row(row, widths) for row in body)
+    for row in report.rows:
+        if row.def_status != "ok":
+            table_lines.append(
+                f"  {row.server}: definitions unavailable — "
+                f"{row.def_error or 'unknown error'}"
+            )
 
     breakdown = []
     for row in report.rows:
@@ -190,3 +201,17 @@ def _format_table_row(row: tuple[str, ...], widths: list[int]) -> str:
     return "  ".join(
         value.ljust(widths[index]) for index, value in enumerate(row)
     ).rstrip()
+
+
+def _positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be at least 1")
+    return parsed
+
+
+def _positive_float(value: str) -> float:
+    parsed = float(value)
+    if not parsed > 0:
+        raise argparse.ArgumentTypeError("must be greater than 0")
+    return parsed

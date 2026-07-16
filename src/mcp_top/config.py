@@ -12,6 +12,9 @@ from dataclasses import dataclass
 from typing import Any
 
 
+_MISSING = object()
+
+
 @dataclass
 class ServerConfig:
     """A configured MCP server from the winning Claude Code config scope."""
@@ -45,7 +48,10 @@ def discover_servers(
         _merge_servers(
             servers,
             _server_configs_from_mapping(
-                user_config.get("mcpServers"), "user", user_path
+                user_config.get("mcpServers", _MISSING),
+                "user",
+                user_path,
+                warnings,
             ),
             warnings,
         )
@@ -62,9 +68,10 @@ def discover_servers(
                         _merge_servers(
                             servers,
                             _server_configs_from_mapping(
-                                project_config.get("mcpServers"),
+                                project_config.get("mcpServers", _MISSING),
                                 "user-project",
                                 user_path,
+                                warnings,
                             ),
                             warnings,
                         )
@@ -76,7 +83,10 @@ def discover_servers(
             _merge_servers(
                 servers,
                 _server_configs_from_mapping(
-                    project_config.get("mcpServers"), "project", project_path
+                    project_config.get("mcpServers", _MISSING),
+                    "project",
+                    project_path,
+                    warnings,
                 ),
                 warnings,
             )
@@ -90,13 +100,14 @@ def _read_json_object(path: str, warnings: list[str]) -> dict[str, Any] | None:
     try:
         with open(path, "r", encoding="utf-8") as handle:
             data = json.load(handle)
-    except (json.JSONDecodeError, UnicodeError) as err:
+    except (json.JSONDecodeError, UnicodeError, RecursionError) as err:
         warnings.append(f"could not parse {path}: {err}")
         return None
     except OSError as err:
         warnings.append(f"could not read {path}: {err}")
         return None
     if not isinstance(data, dict):
+        warnings.append(f"{path}: config root is not an object")
         return None
     return data
 
@@ -117,14 +128,22 @@ def _merge_servers(
 
 
 def _server_configs_from_mapping(
-    mapping: Any, scope: str, source_path: str
+    mapping: Any, scope: str, source_path: str, warnings: list[str]
 ) -> list[ServerConfig]:
+    if mapping is _MISSING:
+        return []
     if not isinstance(mapping, dict):
+        warnings.append(f"{source_path}: mcpServers is not an object")
         return []
 
     configs: list[ServerConfig] = []
     for name, spec in mapping.items():
-        if not isinstance(name, str) or not isinstance(spec, dict):
+        if not isinstance(spec, dict):
+            warnings.append(
+                f"{source_path}: server {name!r} spec is not an object"
+            )
+            continue
+        if not isinstance(name, str):
             continue
         configs.append(_server_config_from_spec(name, scope, source_path, spec))
     return configs
@@ -178,4 +197,5 @@ def _same_config_path(left: str, right: str) -> bool:
 
 def _path_key(path: str) -> str:
     normalized = os.path.normpath(path).replace("\\", "/")
-    return normalized.rstrip("/").casefold()
+    normalized = normalized.rstrip("/")
+    return normalized.casefold() if os.name == "nt" else normalized

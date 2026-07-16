@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 import os
+import json
 import tempfile
 import unittest
 
 import _path  # noqa: F401
 
-from mcp_top.adapters.claude_code import find_transcripts, parse_session
+from mcp_top.adapters.claude_code import (
+    find_transcripts,
+    parse_session,
+    session_key,
+)
 
 
 FIXTURES = os.path.join(os.path.dirname(__file__), "fixtures", "transcripts")
@@ -105,8 +110,10 @@ class ClaudeCodeAdapterTests(unittest.TestCase):
             paths = [
                 os.path.join(second, "z.jsonl"),
                 os.path.join(first, "a.jsonl"),
+                os.path.join(first, "session-id", "subagents", "agent-x.jsonl"),
             ]
             for path in paths:
+                os.makedirs(os.path.dirname(path), exist_ok=True)
                 with open(path, "w", encoding="utf-8"):
                     pass
             with open(os.path.join(projects, "ignored.jsonl"), "w", encoding="utf-8"):
@@ -115,6 +122,124 @@ class ClaudeCodeAdapterTests(unittest.TestCase):
             found = find_transcripts(home)
 
         self.assertEqual(found, sorted(paths))
+
+    def test_session_key_groups_nested_transcripts_under_parent(self) -> None:
+        home = os.path.join("home", "test")
+        project = os.path.join(home, ".claude", "projects", "slug")
+
+        self.assertEqual(
+            session_key(os.path.join(project, "uuid.jsonl"), home),
+            "slug/uuid",
+        )
+        self.assertEqual(
+            session_key(
+                os.path.join(
+                    project, "uuid", "subagents", "agent-123.jsonl"
+                ),
+                home,
+            ),
+            "slug/uuid",
+        )
+
+    def test_version_policy_rejects_malformed_and_incomplete_markers(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            malformed = self._write_records(
+                temporary,
+                "malformed.jsonl",
+                [self._record(7)],
+            )
+            incomplete = self._write_records(
+                temporary,
+                "incomplete.jsonl",
+                [self._record("2.")],
+            )
+            supported = self._write_records(
+                temporary,
+                "supported.jsonl",
+                [self._record("2.1.207")],
+            )
+
+            malformed_result = parse_session(malformed)
+            incomplete_result = parse_session(incomplete)
+            supported_result = parse_session(supported)
+
+        self.assertEqual(malformed_result.skip_reason, "malformed version marker")
+        self.assertEqual(
+            incomplete_result.skip_reason, 'unknown format version "2."'
+        )
+        self.assertEqual(supported_result.status, "parsed")
+
+    def test_timestamps_use_valid_minimum_and_maximum(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = self._write_records(
+                temporary,
+                "out-of-order.jsonl",
+                [
+                    self._record("2.1.207", "2026-06-10T12:00:00Z"),
+                    self._record("2.1.207", "not-a-timestamp"),
+                    self._record("2.1.207", "2026-06-10T10:00:00Z"),
+                    self._record("2.1.207", "2026-06-10T11:00:00Z"),
+                ],
+            )
+
+            result = parse_session(path)
+
+        self.assertEqual(result.first_ts, "2026-06-10T10:00:00Z")
+        self.assertEqual(result.last_ts, "2026-06-10T12:00:00Z")
+
+    def test_duplicate_tool_use_ids_are_counted_once(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            record = self._record("2.1.207")
+            record["type"] = "assistant"
+            record["message"] = {
+                "content": [
+                    {"type": "tool_use", "id": "same", "name": "First"},
+                    {"type": "tool_use", "id": "same", "name": "Second"},
+                    {"type": "tool_use", "name": "NoId"},
+                    {"type": "tool_use", "id": 7, "name": "NonStringId"},
+                ]
+            }
+            path = self._write_records(temporary, "duplicates.jsonl", [record])
+
+            result = parse_session(path)
+
+        self.assertEqual(
+            [call.tool for call in result.tool_calls],
+            ["First", "NoId", "NonStringId"],
+        )
+        self.assertEqual(result.duplicate_tool_use, 1)
+
+    def test_pathological_json_line_is_counted_bad_without_raising(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = os.path.join(temporary, "deep.jsonl")
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write("[" * 2000 + "]" * 2000 + "\n")
+                for _ in range(10):
+                    handle.write(json.dumps(self._record("2.1.207")) + "\n")
+
+            result = parse_session(path)
+
+        self.assertEqual(result.status, "parsed")
+        self.assertEqual(result.bad_lines, 1)
+
+    def _record(
+        self, version: object, timestamp: str = "2026-06-10T10:00:00Z"
+    ) -> dict:
+        return {
+            "type": "user",
+            "version": version,
+            "timestamp": timestamp,
+            "sessionId": "session-id",
+        }
+
+    def _write_records(
+        self, directory: str, name: str, records: list[dict]
+    ) -> str:
+        path = os.path.join(directory, name)
+        with open(path, "w", encoding="utf-8") as handle:
+            for record in records:
+                handle.write(json.dumps(record) + "\n")
+        return path
 
 
 if __name__ == "__main__":

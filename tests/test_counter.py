@@ -39,7 +39,13 @@ class CountCallsTests(unittest.TestCase):
             ),
         ]
 
-        usage = count_calls(sessions, window_sessions=2, window_days=30, now=NOW)
+        usage = count_calls(
+            sessions,
+            [session.path for session in sessions],
+            window_sessions=2,
+            window_days=30,
+            now=NOW,
+        )
 
         self.assertEqual(usage.sessions_considered, 2)
         self.assertEqual(usage.window_sessions, 2)
@@ -76,11 +82,79 @@ class CountCallsTests(unittest.TestCase):
             ),
         ]
 
-        usage = count_calls(sessions, window_sessions=30, window_days=30, now=NOW)
+        usage = count_calls(
+            sessions,
+            [session.path for session in sessions],
+            window_sessions=30,
+            window_days=30,
+            now=NOW,
+        )
 
         self.assertEqual(usage.sessions_considered, 1)
         self.assertEqual(usage.counts, {"BoundaryTool": 1})
         self.assertEqual(usage.sidechain_counts, {"BoundaryTool": 1})
+
+    def test_parent_and_subagent_share_one_group_and_sum_calls(self) -> None:
+        sessions = [
+            self._session(
+                "parent",
+                "2026-06-14T12:00:00Z",
+                [ToolCall("ParentTool", "2026-06-14T12:00:00Z", False)],
+            ),
+            self._session(
+                "subagent",
+                "2026-06-14T13:00:00Z",
+                [ToolCall("SubagentTool", "2026-06-14T13:00:00Z", True)],
+            ),
+            self._session(
+                "older",
+                "2026-06-13T12:00:00Z",
+                [ToolCall("OlderTool", "2026-06-13T12:00:00Z", False)],
+            ),
+        ]
+
+        usage = count_calls(
+            sessions,
+            ["slug/uuid", "slug/uuid", "slug/older"],
+            window_sessions=1,
+            window_days=30,
+            now=NOW,
+        )
+
+        self.assertEqual(usage.sessions_considered, 1)
+        self.assertEqual(usage.counts, {"ParentTool": 1, "SubagentTool": 1})
+        self.assertEqual(usage.sidechain_counts, {"SubagentTool": 1})
+
+    def test_future_dated_group_is_excluded_before_session_cap(self) -> None:
+        sessions = [
+            self._session(
+                "future-parent",
+                "2026-06-15T12:06:00Z",
+                [ToolCall("Future", "2026-06-15T12:06:00Z", False)],
+            ),
+            self._session(
+                "future-child",
+                "2026-06-15T13:00:00Z",
+                [ToolCall("FutureChild", "2026-06-15T13:00:00Z", False)],
+            ),
+            self._session(
+                "current",
+                "2026-06-15T12:00:00Z",
+                [ToolCall("Current", "2026-06-15T12:00:00Z", False)],
+            ),
+        ]
+
+        usage = count_calls(
+            sessions,
+            ["slug/future", "slug/future", "slug/current"],
+            window_sessions=1,
+            window_days=30,
+            now=NOW,
+        )
+
+        self.assertEqual(usage.future_sessions, 1)
+        self.assertEqual(usage.sessions_considered, 1)
+        self.assertEqual(usage.counts, {"Current": 1})
 
     def _session(
         self, path: str, last_ts: str | None, calls: list[ToolCall]

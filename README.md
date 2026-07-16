@@ -29,7 +29,7 @@ Example output:
 ```text
 $ python bin/mcp-top
 
-Coverage: 64 transcripts found, 64 parsed, 0 skipped; 30 in window; 1721 tool calls (0 MCP); server queries: 3 ok, 0 failed
+Coverage: 148 transcripts found, 148 parsed, 0 skipped; 30 in window; 2412 tool calls (0 MCP); server queries: 3 ok, 0 failed, 0 not queried
 
 SERVER      SCOPE  TOOLS  DEF TOKENS  CALLS(window)  VERDICT
 ----------  -----  -----  ----------  -------------  ----------------------------
@@ -46,6 +46,8 @@ Definition token counts use the chars/4 heuristic; ~ means estimate.
 2. Query each configured stdio server read-only with MCP `initialize` and `tools/list` to fetch its actual tool definitions.
 3. Parse local session transcripts through a versioned adapter and count tool calls in a recent window, defaulting to the last 30 sessions and 30 days.
 4. Join definition cost to recent usage, rank servers, and print `keep`, `review`, or `prune` verdicts.
+
+Naive timestamps are treated as UTC. Subagent transcripts are included and grouped under their parent session for windowing.
 
 Querying definitions launches the configured server commands. `mcp-top` sends read-only protocol calls and kills the processes afterward. Use `--no-query` to skip launching servers; definition weights are then unknown.
 
@@ -67,7 +69,7 @@ Querying definitions launches the configured server commands. `mcp-top` sends re
 
 `--version`: print the installed version and exit.
 
-Exit code `0` means the report completed. Exit code `2` means an unexpected internal failure occurred. Skipped transcripts are reported in coverage and are not fatal.
+Exit code `0` means the report completed. Exit code `2` means invalid usage or an unexpected internal error. Skipped transcripts are reported in coverage and are not fatal.
 
 ## Honesty Rules
 

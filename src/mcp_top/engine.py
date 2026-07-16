@@ -9,6 +9,7 @@ from mcp_top.config import ServerConfig
 from mcp_top.counter import UsageWindow
 from mcp_top.coverage import Coverage, build_coverage
 from mcp_top.mcpclient import ServerTools
+from mcp_top.names import parse_mcp_tool_name
 from mcp_top.tokens import HEURISTIC, TokenCount, estimate_tool_definition
 
 
@@ -53,9 +54,10 @@ def build_report(
     """
 
     tools_by_server = {result.server: result for result in server_tools_list}
+    configured_names = {server.name for server in servers}
     calls_by_server: dict[str, dict[str, int]] = {}
     for full_name, count in window.counts.items():
-        parsed = _parse_mcp_tool_name(full_name)
+        parsed = parse_mcp_tool_name(full_name, configured_names)
         if parsed is None:
             continue
         server_name, tool_name = parsed
@@ -63,7 +65,6 @@ def build_report(
         called_tools[tool_name] = called_tools.get(tool_name, 0) + count
 
     rows: list[ServerRow] = []
-    configured_names = {server.name for server in servers}
     for server in servers:
         result = tools_by_server.get(server.name)
         if result is None:
@@ -122,7 +123,11 @@ def build_report(
         rows=rows,
         window=window,
         coverage=build_coverage(
-            sessions, window, server_tools_list, config_warnings
+            sessions,
+            window,
+            server_tools_list,
+            config_warnings,
+            configured_names,
         ),
         generated_note=(
             f"Definition token counts use the {HEURISTIC} heuristic; "
@@ -139,19 +144,6 @@ def _definition_tokens(result: ServerTools) -> TokenCount | None:
         tokens=sum(estimate.tokens for estimate in estimates),
         exact=bool(estimates) and all(estimate.exact for estimate in estimates),
     )
-
-
-def _parse_mcp_tool_name(name: str) -> tuple[str, str] | None:
-    prefix = "mcp__"
-    if not name.startswith(prefix):
-        return None
-    remainder = name[len(prefix) :]
-    if "__" not in remainder:
-        return None
-    server, tool = remainder.split("__", 1)
-    if not server or not tool:
-        return None
-    return server, tool
 
 
 def _verdict(calls: int, def_status: str) -> str:
