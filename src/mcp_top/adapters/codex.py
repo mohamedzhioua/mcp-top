@@ -56,6 +56,7 @@ def parse_session(
     records = read_result.records
     timestamps: list[tuple[Any, str]] = []
     versions_seen: list[str] = []
+    saw_session_meta = False
     session_id: str | None = None
     tool_calls: list[ToolCall] = []
     seen_call_ids: set[str] = set()
@@ -73,9 +74,12 @@ def parse_session(
             continue
 
         if record.get("type") == "session_meta":
+            saw_session_meta = True
             version = payload.get("cli_version")
             if isinstance(version, str) and version not in versions_seen:
                 versions_seen.append(version)
+            elif not isinstance(version, str) and "(unversioned)" not in versions_seen:
+                versions_seen.append("(unversioned)")
             record_session_id = payload.get("id")
             if session_id is None and isinstance(record_session_id, str):
                 session_id = record_session_id
@@ -91,11 +95,12 @@ def parse_session(
             if call_id in seen_call_ids:
                 duplicate_tool_use += 1
                 continue
-            seen_call_ids.add(call_id)
 
         name = payload.get("name")
         if not isinstance(name, str):
             continue
+        if isinstance(call_id, str):
+            seen_call_ids.add(call_id)
         namespace = payload.get("namespace")
         tool_calls.append(
             _tool_call(
@@ -108,7 +113,7 @@ def parse_session(
     first_ts = min(timestamps, default=(None, None), key=lambda item: item[0])[1]
     last_ts = max(timestamps, default=(None, None), key=lambda item: item[0])[1]
 
-    if not versions_seen:
+    if not saw_session_meta:
         return SessionResult(
             path=path,
             session_id=session_id,

@@ -29,13 +29,38 @@ Example output:
 ```text
 $ python bin/mcp-top
 
-Coverage: 148 transcripts found, 148 parsed, 0 skipped; 30 in window; 2412 tool calls (0 MCP); server queries: 3 ok, 0 failed, 0 not queried
+=== claude-code ===
+
+Coverage: 180 transcripts found, 180 parsed, 0 skipped; 30 in window; 638 tool calls (0 MCP); server queries: 3 ok, 0 failed, 0 not queried
 
 SERVER      SCOPE  TOOLS  DEF TOKENS  CALLS(window)  VERDICT
 ----------  -----  -----  ----------  -------------  ----------------------------
 serena      user   20     ~6,182      0              prune -> save ~6,182/session
 playwright  user   24     ~4,621      0              prune -> save ~4,621/session
 context7    user   2      ~1,229      0              prune -> save ~1,229/session
+
+=== codex ===
+
+Coverage: 110 transcripts found, 110 parsed, 0 skipped; 30 in window; 1139 tool calls (6 MCP); server queries: 4 ok, 0 failed, 0 not queried
+
+SERVER      SCOPE  TOOLS  DEF TOKENS  CALLS(window)  VERDICT
+----------  -----  -----  ----------  -------------  ----------------------------
+playwright  user   24     ~4,621      0              prune -> save ~4,621/session
+node_repl   user   3      ~1,475      0              prune -> save ~1,475/session
+context7    user   2      ~1,229      0              prune -> save ~1,229/session
+serena      user   22     ~6,509      6              keep
+
+serena called tools:
+  - initial_instructions: 6
+
+=== cursor ===
+
+Coverage: 0 transcripts found, 0 parsed, 0 skipped; usage: unknown (no transcript adapter); server queries: 0 ok, 0 failed, 0 not queried
+  usage: Cursor stores chats in undocumented SQLite; no transcript adapter in v0.2 -- usage unknown
+  config warning: C:\Users\User\.cursor\mcp.json: exists but is empty -- no servers read
+
+SERVER  SCOPE  TOOLS  DEF TOKENS  CALLS(window)  VERDICT
+------  -----  -----  ----------  -------------  -------
 
 Definition token counts use the chars/4 heuristic; ~ means estimate.
 ```
@@ -67,7 +92,7 @@ Querying definitions launches the configured server commands. `mcp-top` sends re
 
 `--no-query`: do not launch configured MCP servers. Default: off.
 
-`--json`: emit machine-readable JSON schema `mcp-top/v2` instead of the human table. JSON v2 groups results under `clis[]`; each CLI entry has `cli`, `window`, `coverage`, and `servers`.
+`--json`: emit machine-readable JSON schema `mcp-top/v2` instead of the human table. JSON v2 groups results under `clis[]`; each CLI entry has `cli`, `window`, `coverage`, and `servers`. Rows use `usage_status: "no-data"` when transcripts exist or are expected but no usable sessions fall inside the usage window. Coverage usage counters such as `in_window`, `total_tool_calls`, and `mcp_tool_calls` are nullable when usage cannot be measured, such as a CLI without a transcript adapter.
 
 `--version`: print the installed version and exit.
 

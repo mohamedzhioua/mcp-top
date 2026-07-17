@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import tomllib
 from typing import Any
 
 from mcp_top.config import (
@@ -47,6 +46,8 @@ def _read_toml_object(
 ) -> dict[str, Any] | None:
     if not os.path.exists(path):
         return None
+    import tomllib
+
     try:
         with open(path, "rb") as handle:
             data = tomllib.load(handle)

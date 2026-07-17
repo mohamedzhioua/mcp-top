@@ -81,6 +81,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(server["calls"], 2)
         self.assertEqual(server["usage_status"], "measured")
         self.assertEqual(server["verdict"], "review")
+        self.assertEqual(server["filtered_tools"], 0)
 
     def test_human_output_starts_with_coverage_then_table(self) -> None:
         exit_code, output = self._run()
@@ -130,9 +131,9 @@ class CliTests(unittest.TestCase):
                         transcripts_found=0,
                         transcripts_parsed=0,
                         transcripts_skipped=[],
-                        in_window=0,
-                        total_tool_calls=0,
-                        mcp_tool_calls=0,
+                        in_window=None,
+                        total_tool_calls=None,
+                        mcp_tool_calls=None,
                         servers_queried_ok=0,
                         servers_query_failed=[],
                         config_warnings=[],
@@ -150,6 +151,9 @@ class CliTests(unittest.TestCase):
         self.assertIsNone(server["calls"])
         self.assertEqual(server["usage_status"], "unsupported")
         self.assertEqual(server["verdict"], "unknown")
+        self.assertIsNone(payload["clis"][0]["coverage"]["in_window"])
+        self.assertIsNone(payload["clis"][0]["coverage"]["total_tool_calls"])
+        self.assertIsNone(payload["clis"][0]["coverage"]["mcp_tool_calls"])
 
     def test_human_output_renders_unknown_usage_with_dash(self) -> None:
         report = Report(
@@ -176,9 +180,9 @@ class CliTests(unittest.TestCase):
                         transcripts_found=0,
                         transcripts_parsed=0,
                         transcripts_skipped=[],
-                        in_window=0,
-                        total_tool_calls=0,
-                        mcp_tool_calls=0,
+                        in_window=None,
+                        total_tool_calls=None,
+                        mcp_tool_calls=None,
                         servers_queried_ok=0,
                         servers_query_failed=[],
                         config_warnings=[],
@@ -193,6 +197,7 @@ class CliTests(unittest.TestCase):
         self.assertIn("CALLS(window)", rendered)
         self.assertIn("alpha", rendered)
         self.assertIn("-              unknown", rendered)
+        self.assertIn("usage: unknown (no transcript adapter)", rendered)
 
     def test_human_output_explains_unavailable_definitions(self) -> None:
         exit_code, output = self._run("--no-query")
@@ -226,6 +231,72 @@ class CliTests(unittest.TestCase):
             by_cli["codex"]["coverage"],
         )
 
+    def test_all_detects_claude_project_mcp_json_without_home_config(self) -> None:
+        with tempfile.TemporaryDirectory() as home:
+            project = os.path.join(home, "project")
+            os.makedirs(project)
+            with open(os.path.join(project, ".mcp.json"), "w", encoding="utf-8") as handle:
+                json.dump({"mcpServers": {"docs": {"command": "fake"}}}, handle)
+
+            exit_code, output = self._run_with_home_project(
+                home,
+                project,
+                "--json",
+                "--no-query",
+            )
+
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(output)
+        self.assertEqual([entry["cli"] for entry in payload["clis"]], ["claude-code"])
+
+    def test_all_detects_codex_project_config_without_home_config(self) -> None:
+        with tempfile.TemporaryDirectory() as home:
+            project = os.path.join(home, "project")
+            project_codex = os.path.join(project, ".codex")
+            os.makedirs(project_codex)
+            with open(
+                os.path.join(project_codex, "config.toml"), "w", encoding="utf-8"
+            ) as handle:
+                handle.write("[mcp_servers.project_only]\ncommand = 'ignored'\n")
+
+            exit_code, output = self._run_with_home_project(
+                home,
+                project,
+                "--json",
+                "--no-query",
+            )
+
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(output)
+        self.assertEqual([entry["cli"] for entry in payload["clis"]], ["codex"])
+        self.assertEqual(
+            payload["clis"][0]["coverage"]["config_warnings"],
+            [
+                "project-layer codex config present but not read in v0.2 "
+                "(user scope only)"
+            ],
+        )
+
+    def test_all_without_detection_reports_note_and_empty_clis(self) -> None:
+        with tempfile.TemporaryDirectory() as home:
+            project = os.path.join(home, "project")
+            os.makedirs(project)
+
+            human_exit, human = self._run_with_home_project(home, project)
+            json_exit, json_output = self._run_with_home_project(
+                home,
+                project,
+                "--json",
+            )
+
+        note = f"no supported CLIs detected under {home}"
+        self.assertEqual(human_exit, 0)
+        self.assertIn(note, human)
+        self.assertEqual(json_exit, 0)
+        payload = json.loads(json_output)
+        self.assertEqual(payload["clis"], [])
+        self.assertEqual(payload["note"], note)
+
     def test_zero_sessions_is_argparse_usage_error(self) -> None:
         stderr = io.StringIO()
         with contextlib.redirect_stderr(stderr):
@@ -254,12 +325,17 @@ class CliTests(unittest.TestCase):
         self.assertIn("Python 3.11 or newer", stderr.getvalue())
 
     def _run(self, *extra: str) -> tuple[int, str]:
+        return self._run_with_home_project(self.home, self.project, *extra)
+
+    def _run_with_home_project(
+        self, home: str, project: str, *extra: str
+    ) -> tuple[int, str]:
         output = io.StringIO()
         args = [
             "--home",
-            self.home,
+            home,
             "--project",
-            self.project,
+            project,
             "--days",
             "3650",
             *extra,

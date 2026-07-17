@@ -17,9 +17,9 @@ class Coverage:
     transcripts_found: int
     transcripts_parsed: int
     transcripts_skipped: list[tuple[str, str]]
-    in_window: int
-    total_tool_calls: int
-    mcp_tool_calls: int
+    in_window: int | None
+    total_tool_calls: int | None
+    mcp_tool_calls: int | None
     servers_queried_ok: int
     servers_query_failed: list[tuple[str, str]]
     config_warnings: list[str]
@@ -51,10 +51,10 @@ def build_coverage(
         for result in server_tools_list
         if result.status == "error"
     ]
-    total_tool_calls = 0
-    mcp_tool_calls = 0
+    total_tool_calls: int | None = None
+    mcp_tool_calls: int | None = None
     unattributed_mcp_calls = 0
-    in_window = 0
+    in_window: int | None = None
     future_sessions = 0
     if window is None:
         usage_note = usage_note or "no transcript adapter for this CLI in v0.2"
@@ -68,6 +68,14 @@ def build_coverage(
         unattributed_mcp_calls = window.unattributed_mcp_calls
         in_window = window.sessions_considered
         future_sessions = window.future_sessions
+        if window.sessions_considered == 0:
+            if not sessions:
+                usage_note = usage_note or "no transcripts found -- usage unknown"
+            else:
+                usage_note = (
+                    usage_note
+                    or "no usable sessions in the window -- usage unknown"
+                )
     return Coverage(
         transcripts_found=len(sessions),
         transcripts_parsed=sum(
@@ -109,14 +117,21 @@ def build_coverage(
 def render_coverage_text(cov: Coverage) -> str:
     """Render coverage first-line summary plus every skip, failure, and warning."""
 
+    usage_fragment = (
+        "usage: unknown (no transcript adapter)"
+        if cov.in_window is None
+        else (
+            f"{cov.in_window} in window; "
+            f"{cov.total_tool_calls} tool calls "
+            f"({cov.mcp_tool_calls} MCP)"
+        )
+    )
     lines = [
         "Coverage: "
         f"{cov.transcripts_found} transcripts found, "
         f"{cov.transcripts_parsed} parsed, "
         f"{len(cov.transcripts_skipped)} skipped; "
-        f"{cov.in_window} in window; "
-        f"{cov.total_tool_calls} tool calls "
-        f"({cov.mcp_tool_calls} MCP); "
+        f"{usage_fragment}; "
         f"server queries: {cov.servers_queried_ok} ok, "
         f"{len(cov.servers_query_failed)} failed, "
         f"{cov.servers_unsupported} not queried"
@@ -159,8 +174,8 @@ def render_coverage_text(cov: Coverage) -> str:
 
 def _shorten_transcript_path(path: str) -> str:
     normalized = os.path.normpath(path).replace("\\", "/")
-    marker = "/.claude/projects/"
-    marker_index = normalized.casefold().find(marker)
-    if marker_index >= 0:
-        return "~" + normalized[marker_index:]
+    for marker in ("/.claude/projects/", "/.codex/sessions/"):
+        marker_index = normalized.casefold().find(marker)
+        if marker_index >= 0:
+            return "~" + normalized[marker_index:]
     return normalized

@@ -25,6 +25,9 @@ class ParseMcpToolNameTests(unittest.TestCase):
     def test_mcp_prefix_without_tool_is_unattributable(self) -> None:
         self.assertIsNone(parse_mcp_tool_name("mcp__x"))
 
+    def test_configured_server_without_tool_is_unattributable(self) -> None:
+        self.assertIsNone(parse_mcp_tool_name("mcp__x", {"x"}))
+
 
 if __name__ == "__main__":
     unittest.main()

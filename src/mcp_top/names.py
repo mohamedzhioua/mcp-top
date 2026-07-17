@@ -17,8 +17,6 @@ def parse_mcp_tool_name(
     if configured is not None:
         for server in sorted(configured, key=len, reverse=True):
             server_prefix = prefix + server
-            if name == server_prefix:
-                return server, ""
             separator_prefix = server_prefix + "__"
             if name.startswith(separator_prefix):
                 return server, name[len(separator_prefix) :]

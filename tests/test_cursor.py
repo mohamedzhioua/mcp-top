@@ -87,6 +87,9 @@ class CursorTests(unittest.TestCase):
         payload = json.loads(output.getvalue())
         self.assertEqual(payload["clis"][0]["cli"], "cursor")
         coverage = payload["clis"][0]["coverage"]
+        self.assertIsNone(coverage["in_window"])
+        self.assertIsNone(coverage["total_tool_calls"])
+        self.assertIsNone(coverage["mcp_tool_calls"])
         self.assertEqual(
             coverage["usage_note"],
             "Cursor stores chats in undocumented SQLite; no transcript "

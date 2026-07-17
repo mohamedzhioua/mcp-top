@@ -130,6 +130,43 @@ class CodexConfigTests(unittest.TestCase):
             ],
         )
 
+    def test_malformed_server_fields_warn_and_use_safe_values(self) -> None:
+        with tempfile.TemporaryDirectory() as home:
+            codex_dir = os.path.join(home, ".codex")
+            os.makedirs(codex_dir)
+            config_path = os.path.join(codex_dir, "config.toml")
+            with open(config_path, "w", encoding="utf-8") as handle:
+                handle.write(
+                    "[mcp_servers.bad]\n"
+                    "command = 'fake'\n"
+                    "args = 'not-list'\n"
+                    "enabled = 'false'\n"
+                    "startup_timeout_sec = -1\n"
+                    "[mcp_servers.bad.env]\n"
+                    "KEEP = 'yes'\n"
+                    "DROP = 7\n"
+                )
+
+            servers, warnings = discover_servers(home, None)
+
+        self.assertEqual(len(servers), 1)
+        server = servers[0]
+        self.assertEqual(server.args, [])
+        self.assertEqual(server.env, {"KEEP": "yes"})
+        self.assertIsNone(server.query_timeout)
+        self.assertFalse(server.enabled)
+        self.assertTrue(any("args is not a list" in warning for warning in warnings))
+        self.assertTrue(any("env key 'DROP'" in warning for warning in warnings))
+        self.assertTrue(
+            any(
+                "startup_timeout_sec is not a positive finite number" in warning
+                for warning in warnings
+            )
+        )
+        self.assertTrue(
+            any("enabled is not a boolean" in warning for warning in warnings)
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
