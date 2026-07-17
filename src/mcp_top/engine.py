@@ -215,8 +215,11 @@ def _prune_suggestions(
     """
 
     config_by_name = {server.name: server for server in servers}
+    # Match only the read/parse-failure warnings emitted by the config readers,
+    # which always begin with these prefixes. A substring match would misfire on
+    # a server literally named "could not parse".
     provenance_incomplete = any(
-        "could not parse" in warning or "could not read" in warning
+        warning.startswith(("could not parse", "could not read"))
         for warning in (config_warnings or [])
     )
     suggestions: list[PruneSuggestion] = []
@@ -263,6 +266,12 @@ def _prune_suggestions(
                 "shadowing or shadowed entry may be missing; treat removal as "
                 "unverified"
             )
+
+        # A CLI resolver may attach its own reason a clean removal is unsafe
+        # (e.g. a Codex project layer that could redefine this server in a
+        # trusted project). It always forces a review candidate.
+        if cfg.resolution_caveat:
+            reasons.append(cfg.resolution_caveat)
 
         kind = "suggestion" if not reasons else "candidate"
         suggestions.append(

@@ -339,7 +339,7 @@ class CliTests(unittest.TestCase):
 
         _, plain = self._run("--json")
         plain_cli = json.loads(plain)["clis"][0]
-        # Contract: plain --json is unchanged; no new key, schema stays v2.
+        # Contract: suggested_removals is --prune-only; schema stays v2.
         self.assertNotIn("suggested_removals", plain_cli)
 
         _, pruned = self._run("--json", "--prune")

@@ -253,8 +253,9 @@ def _cli_json(cli_report: CliReport, include_prune: bool = False) -> dict:
         "servers": [_row_json(row) for row in cli_report.rows],
     }
     if include_prune:
-        # Additive field: appears only with --prune, so plain --json stays
-        # byte-for-byte identical and the schema remains mcp-top/v2.
+        # Additive field: the suggested_removals array appears only with
+        # --prune. Plain --json stays backward-compatible within schema
+        # mcp-top/v2 (it never carries this key).
         entry["suggested_removals"] = [
             _suggestion_json(item) for item in cli_report.suggestions
         ]

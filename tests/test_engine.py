@@ -339,6 +339,35 @@ class PruneClassificationTests(unittest.TestCase):
             any("could not be parsed" in reason for reason in candidate.reasons)
         )
 
+    def test_server_named_like_a_warning_does_not_downgrade(self) -> None:
+        # A server literally named "could not parse" must not trip the
+        # provenance-incomplete check: those warnings begin with the phrase.
+        cfg = self._cfg("serena", scope="user", precedence=0)
+
+        report = self._report(
+            [cfg],
+            [self._tools("serena", 3)],
+            config_warnings=[
+                "cfg.json: server 'could not parse' enabled_tools is not a "
+                "list -- ignored (no tool filter applied)"
+            ],
+        )
+
+        self.assertEqual(report.suggestions[0].kind, "suggestion")
+
+    def test_resolution_caveat_forces_candidate(self) -> None:
+        cfg = self._cfg("serena", scope="user", precedence=0)
+        cfg.resolution_caveat = "a project layer may redefine this server"
+
+        report = self._report([cfg], [self._tools("serena", 3)])
+
+        candidate = report.suggestions[0]
+        self.assertEqual(candidate.kind, "candidate")
+        self.assertIsNone(candidate.net_tokens)
+        self.assertIn(
+            "a project layer may redefine this server", candidate.reasons
+        )
+
     def _report(self, servers, definitions, config_warnings=None):
         window = UsageWindow(
             sessions_considered=1,

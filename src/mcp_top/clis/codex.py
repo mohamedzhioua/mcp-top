@@ -19,8 +19,12 @@ def discover_servers(
 
     warnings: list[str] = []
     user_path = os.path.join(home, ".codex", "config.toml")
+    project_names: set[str] | None = None
+    project_unreadable = False
     if project_dir is not None:
-        _report_project_layer(project_dir, user_path, warnings)
+        project_names, project_unreadable = _report_project_layer(
+            project_dir, user_path, warnings
+        )
 
     config = _read_toml_object(user_path, warnings)
     if config is None:
@@ -33,12 +37,13 @@ def discover_servers(
         warnings,
         "mcp_servers",
     )
+    _apply_project_layer_caveats(servers, project_names, project_unreadable)
     return servers, warnings
 
 
 def _report_project_layer(
     project_dir: str, user_path: str, warnings: list[str]
-) -> None:
+) -> tuple[set[str] | None, bool]:
     """Report a project-layer Codex config as a conditional inventory.
 
     The project layer is read and its server names are listed, but it is
@@ -49,15 +54,20 @@ def _report_project_layer(
     reproducing that precedence from the published spec is not possible, so the
     ambiguity is reported rather than guessed. See
     docs/v0.3-provenance-and-prune.md.
+
+    Returns ``(names, unreadable)``: the set of project-layer server names when
+    the file was read, or ``unreadable=True`` when a project file exists but
+    could not be read. Either signal downgrades a same-name user prune to a
+    review candidate, because a trusted project could redefine that server.
     """
 
     project_path = os.path.join(project_dir, ".codex", "config.toml")
     if not os.path.exists(project_path):
-        return
+        return None, False
     # When --project points at the home directory, the "project" config file is
     # literally the user config; do not re-report it as a separate layer.
     if _same_file(project_path, user_path):
-        return
+        return None, False
     config = _read_toml_object(project_path, warnings)
     if config is None:
         # A read/parse warning was already recorded by _read_toml_object.
@@ -65,7 +75,7 @@ def _report_project_layer(
             f"project-layer codex config {project_path} detected but could "
             "not be read -- not queried and not merged"
         )
-        return
+        return None, True
     mapping = config.get("mcp_servers")
     names = (
         sorted(str(name) for name in mapping if isinstance(name, str))
@@ -80,6 +90,38 @@ def _report_project_layer(
         "semantics are undocumented, so these are shown as a conditional "
         "inventory only."
     )
+    return set(names), False
+
+
+def _apply_project_layer_caveats(
+    servers: list[ServerConfig],
+    project_names: set[str] | None,
+    project_unreadable: bool,
+) -> None:
+    """Downgrade user servers a conditional project layer might redefine.
+
+    A same-name project-layer entry (or an unreadable project layer that could
+    contain one) means removing the user server may not save its cost in a
+    trusted project, so it must never be a clean prune suggestion.
+    """
+
+    if project_unreadable:
+        for server in servers:
+            server.resolution_caveat = (
+                "a project-layer .codex/config.toml exists but could not be "
+                "read; in a trusted project it may redefine this server, so "
+                "removal may not save the full cost"
+            )
+        return
+    if not project_names:
+        return
+    for server in servers:
+        if server.name in project_names:
+            server.resolution_caveat = (
+                "a project-layer .codex/config.toml also defines this server; "
+                "in a trusted project Codex may override or merge it, so "
+                "removal may not save the full cost"
+            )
 
 
 def _same_file(left: str, right: str) -> bool:

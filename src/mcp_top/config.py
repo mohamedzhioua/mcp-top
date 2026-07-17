@@ -49,6 +49,7 @@ class ServerConfig:
     query_timeout: float | None = None
     precedence: int = 0
     shadowed: tuple["ServerConfig", ...] = ()
+    resolution_caveat: str | None = None
 
 
 def discover_servers(
@@ -159,7 +160,7 @@ def _merge_servers(
                 f"server {server.name!r} from {server.scope} overrides "
                 f"{existing.scope}"
             )
-            server.shadowed = (existing, *existing.shadowed)
+            server.shadowed = _ordered_chain((existing, *existing.shadowed))
             servers[server.name] = server
         elif server.precedence == existing.precedence:
             warnings.append(
@@ -170,8 +171,20 @@ def _merge_servers(
             servers[server.name] = server
         else:
             # Out-of-order merge: the existing entry outranks the incoming one,
-            # so it stays the winner and the incoming one joins its chain.
-            existing.shadowed = (*existing.shadowed, server)
+            # so it stays the winner and the incoming one joins its chain. The
+            # chain is re-sorted so the immediate fallback is always the
+            # highest-precedence shadowed entry regardless of merge order.
+            existing.shadowed = _ordered_chain((*existing.shadowed, server))
+
+
+def _ordered_chain(
+    entries: tuple[ServerConfig, ...]
+) -> tuple[ServerConfig, ...]:
+    """Return a shadow chain ordered highest precedence first (stable)."""
+
+    return tuple(
+        sorted(entries, key=lambda entry: entry.precedence, reverse=True)
+    )
 
 
 def _server_configs_from_mapping(

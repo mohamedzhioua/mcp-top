@@ -14,8 +14,12 @@ The format is based on Keep a Changelog.
   Everything else that scores `prune` becomes a review `candidate` with an
   explicitly unknown net saving -- project scope (usage is not attributed per
   project), a deletion that would reactivate a lower-precedence entry, or an
-  unparsed config layer. `--json --prune` adds an additive `suggested_removals`
-  array per CLI; plain `--json` is unchanged and the schema stays `mcp-top/v2`.
+  unparsed config layer, or (for Codex) a same-name project-layer entry that a
+  trusted project could redefine. `--json --prune` adds an additive
+  `suggested_removals` array per CLI. The schema stays `mcp-top/v2`: every
+  addition is a backward-compatible field (`coverage.unmatched_enabled_tools`,
+  and `suggested_removals` only under `--prune`); no existing field is renamed,
+  retyped, or removed.
 - Added a config provenance model: `ServerConfig` now records the
   lower-precedence entries a winner shadows, so a prune deletion can be
   simulated for reactivation.
