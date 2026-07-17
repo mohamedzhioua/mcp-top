@@ -240,6 +240,102 @@ class DiscoverServersTests(unittest.TestCase):
             any("enabled is not a boolean" in warning for warning in warnings)
         )
 
+    def test_winner_records_shadowed_lower_precedence_entry(self) -> None:
+        with tempfile.TemporaryDirectory() as home:
+            project_dir = os.path.join(home, "project")
+            os.mkdir(project_dir)
+            self._write_json(
+                os.path.join(home, ".claude.json"),
+                {"mcpServers": {"shared": {"command": "user-cmd"}}},
+            )
+            self._write_json(
+                os.path.join(project_dir, ".mcp.json"),
+                {"mcpServers": {"shared": {"command": "project-cmd"}}},
+            )
+
+            servers, _ = discover_servers(home, project_dir)
+
+        winner = {server.name: server for server in servers}["shared"]
+        self.assertEqual(winner.scope, "project")
+        self.assertEqual(winner.command, "project-cmd")
+        self.assertGreater(winner.precedence, 0)
+        # The user-scope entry is retained so a deletion can be simulated.
+        self.assertEqual(len(winner.shadowed), 1)
+        self.assertEqual(winner.shadowed[0].scope, "user")
+        self.assertEqual(winner.shadowed[0].command, "user-cmd")
+        self.assertLess(winner.shadowed[0].precedence, winner.precedence)
+
+    def test_user_scope_winner_has_no_shadow(self) -> None:
+        with tempfile.TemporaryDirectory() as home:
+            self._write_json(
+                os.path.join(home, ".claude.json"),
+                {"mcpServers": {"solo": {"command": "run"}}},
+            )
+
+            servers, _ = discover_servers(home, None)
+
+        self.assertEqual(servers[0].shadowed, ())
+        self.assertEqual(servers[0].precedence, 0)
+
+    def test_three_layer_shadow_chain_is_ordered_high_to_low(self) -> None:
+        with tempfile.TemporaryDirectory() as home:
+            project_dir = os.path.join(home, "project")
+            os.mkdir(project_dir)
+            configured_path = project_dir.replace("\\", "/")
+            self._write_json(
+                os.path.join(home, ".claude.json"),
+                {
+                    "mcpServers": {"shared": {"command": "user-cmd"}},
+                    "projects": {
+                        configured_path: {
+                            "mcpServers": {"shared": {"command": "userproj-cmd"}}
+                        }
+                    },
+                },
+            )
+            self._write_json(
+                os.path.join(project_dir, ".mcp.json"),
+                {"mcpServers": {"shared": {"command": "project-cmd"}}},
+            )
+
+            servers, _ = discover_servers(home, project_dir)
+
+        winner = {server.name: server for server in servers}["shared"]
+        self.assertEqual(winner.scope, "project")
+        self.assertEqual(
+            [entry.scope for entry in winner.shadowed],
+            ["user-project", "user"],
+        )
+        # Precedence must be strictly decreasing down the chain.
+        ranks = [winner.precedence, *[e.precedence for e in winner.shadowed]]
+        self.assertEqual(ranks, sorted(ranks, reverse=True))
+
+    def test_malformed_enabled_tools_applies_no_filter(self) -> None:
+        with tempfile.TemporaryDirectory() as home:
+            user_path = os.path.join(home, ".claude.json")
+            self._write_json(
+                user_path,
+                {
+                    "mcpServers": {
+                        "srv": {
+                            "command": "run",
+                            "enabled_tools": "not-a-list",
+                        }
+                    }
+                },
+            )
+
+            servers, warnings = discover_servers(home, None)
+
+        # A malformed allowlist must not become an empty allowlist that hides
+        # every tool (which would produce a misleading zero-cost prune row).
+        self.assertIsNone(servers[0].enabled_tools)
+        self.assertTrue(
+            any(
+                "enabled_tools is not a list" in warning for warning in warnings
+            )
+        )
+
     def _write_json(self, path: str, data: object) -> None:
         with open(path, "w", encoding="utf-8") as handle:
             json.dump(data, handle)

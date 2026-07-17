@@ -269,13 +269,11 @@ class CliTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         payload = json.loads(output)
         self.assertEqual([entry["cli"] for entry in payload["clis"]], ["codex"])
-        self.assertEqual(
-            payload["clis"][0]["coverage"]["config_warnings"],
-            [
-                "project-layer codex config present but not read in v0.2 "
-                "(user scope only)"
-            ],
-        )
+        warnings = payload["clis"][0]["coverage"]["config_warnings"]
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("project-layer codex config", warnings[0])
+        self.assertIn("project_only", warnings[0])
+        self.assertIn("not queried and not merged", warnings[0])
 
     def test_all_without_detection_reports_note_and_empty_clis(self) -> None:
         with tempfile.TemporaryDirectory() as home:

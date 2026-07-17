@@ -20,12 +20,7 @@ def discover_servers(
     warnings: list[str] = []
     user_path = os.path.join(home, ".codex", "config.toml")
     if project_dir is not None:
-        project_path = os.path.join(project_dir, ".codex", "config.toml")
-        if os.path.exists(project_path):
-            warnings.append(
-                "project-layer codex config present but not read in v0.2 "
-                "(user scope only)"
-            )
+        _report_project_layer(project_dir, warnings)
 
     config = _read_toml_object(user_path, warnings)
     if config is None:
@@ -39,6 +34,46 @@ def discover_servers(
         "mcp_servers",
     )
     return servers, warnings
+
+
+def _report_project_layer(project_dir: str, warnings: list[str]) -> None:
+    """Report a project-layer Codex config as a conditional inventory.
+
+    The project layer is read and its server names are listed, but it is
+    deliberately not queried and not merged over the user scope. Codex applies
+    project layers only to *trusted* projects -- a state mcp-top cannot observe
+    from files -- reads a cascade of files from the project root down to the
+    working directory, and field-merges same-name tables. Faithfully
+    reproducing that precedence from the published spec is not possible, so the
+    ambiguity is reported rather than guessed. See
+    docs/v0.3-provenance-and-prune.md.
+    """
+
+    project_path = os.path.join(project_dir, ".codex", "config.toml")
+    if not os.path.exists(project_path):
+        return
+    config = _read_toml_object(project_path, warnings)
+    if config is None:
+        # A read/parse warning was already recorded by _read_toml_object.
+        warnings.append(
+            f"project-layer codex config {project_path} detected but could "
+            "not be read -- not queried and not merged"
+        )
+        return
+    mapping = config.get("mcp_servers")
+    names = (
+        sorted(str(name) for name in mapping if isinstance(name, str))
+        if isinstance(mapping, dict)
+        else []
+    )
+    listed = f": {', '.join(names)}" if names else " (no mcp_servers table)"
+    warnings.append(
+        f"project-layer codex config detected at {project_path}"
+        f"{listed} -- not queried and not merged. Codex applies project "
+        "layers only to trusted projects (unobservable here) and layer merge "
+        "semantics are undocumented, so these are shown as a conditional "
+        "inventory only."
+    )
 
 
 def _read_toml_object(

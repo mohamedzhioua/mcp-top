@@ -82,7 +82,7 @@ class CodexConfigTests(unittest.TestCase):
         self.assertEqual(len(warnings), 1)
         self.assertIn(f"could not parse {config_path}:", warnings[0])
 
-    def test_project_layer_config_warns_but_is_not_read(self) -> None:
+    def test_project_layer_config_listed_as_conditional_inventory(self) -> None:
         with tempfile.TemporaryDirectory() as home:
             codex_dir = os.path.join(home, ".codex")
             os.makedirs(codex_dir)
@@ -100,16 +100,16 @@ class CodexConfigTests(unittest.TestCase):
 
             servers, warnings = discover_servers(home, project)
 
+        # The project-layer server is never merged into the queried set.
         self.assertNotIn("project_only", {server.name for server in servers})
-        self.assertEqual(
-            warnings,
-            [
-                "project-layer codex config present but not read in v0.2 "
-                "(user scope only)"
-            ],
-        )
+        inventory = [w for w in warnings if "project-layer codex config" in w]
+        self.assertEqual(len(inventory), 1)
+        note = inventory[0]
+        self.assertIn("project_only", note)
+        self.assertIn("not queried and not merged", note)
+        self.assertIn("conditional inventory", note)
 
-    def test_project_layer_warning_does_not_require_user_config(self) -> None:
+    def test_project_layer_inventory_does_not_require_user_config(self) -> None:
         with tempfile.TemporaryDirectory() as home:
             project = os.path.join(home, "project")
             project_codex = os.path.join(project, ".codex")
@@ -122,13 +122,9 @@ class CodexConfigTests(unittest.TestCase):
             servers, warnings = discover_servers(home, project)
 
         self.assertEqual(servers, [])
-        self.assertEqual(
-            warnings,
-            [
-                "project-layer codex config present but not read in v0.2 "
-                "(user scope only)"
-            ],
-        )
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("project_only", warnings[0])
+        self.assertIn("not queried and not merged", warnings[0])
 
     def test_malformed_server_fields_warn_and_use_safe_values(self) -> None:
         with tempfile.TemporaryDirectory() as home:

@@ -10,7 +10,7 @@ import signal
 import subprocess
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import IO, Any
 
 from mcp_top import __version__
@@ -19,13 +19,20 @@ from mcp_top.config import ServerConfig
 
 @dataclass
 class ServerTools:
-    """Tool definitions returned by one configured MCP server."""
+    """Tool definitions returned by one configured MCP server.
+
+    ``unmatched_enabled_tools`` lists ``enabled_tools`` allowlist names that
+    were not returned by this ``tools/list`` snapshot -- likely typos or
+    removed tools. It is only meaningful when ``status == "ok"`` (the tool set
+    was fully observed) and describes this snapshot, not all future live tools.
+    """
 
     server: str
     status: str
     error: str | None
     tools: list[dict]
     filtered_tools: int = 0
+    unmatched_enabled_tools: list[str] = field(default_factory=list)
 
 
 def list_server_tools(cfg: ServerConfig, timeout: float = 20.0) -> ServerTools:
@@ -145,6 +152,7 @@ def list_server_tools(cfg: ServerConfig, timeout: float = 20.0) -> ServerTools:
             request_id += 1
             params = {"cursor": cursor}
 
+        unmatched = _unmatched_enabled_tools(tools, cfg)
         filtered_tools, hidden = _apply_tool_filters(tools, cfg)
 
         return ServerTools(
@@ -153,6 +161,7 @@ def list_server_tools(cfg: ServerConfig, timeout: float = 20.0) -> ServerTools:
             error=None,
             tools=filtered_tools,
             filtered_tools=hidden,
+            unmatched_enabled_tools=unmatched,
         )
     except TimeoutError as err:
         return ServerTools(
@@ -192,6 +201,26 @@ def _send(stream: IO[bytes], message: dict[str, Any]) -> None:
         (json.dumps(message, separators=(",", ":")) + "\n").encode("utf-8")
     )
     stream.flush()
+
+
+def _unmatched_enabled_tools(
+    tools: list[dict], cfg: ServerConfig
+) -> list[str]:
+    """Return sorted ``enabled_tools`` names not present in this tool snapshot.
+
+    Uses the raw returned tool names before any allow/deny filtering. A name
+    that also appears in ``disabled_tools`` still counts as matched: it was
+    returned by the server, just filtered out afterward.
+    """
+
+    if not cfg.enabled_tools:
+        return []
+    live_names = {
+        tool["name"]
+        for tool in tools
+        if isinstance(tool.get("name"), str)
+    }
+    return sorted(set(cfg.enabled_tools) - live_names)
 
 
 def _apply_tool_filters(

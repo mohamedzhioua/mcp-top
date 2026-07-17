@@ -99,6 +99,29 @@ class McpClientTests(unittest.TestCase):
         self.assertEqual(row.filtered_tools, 1)
         self.assertIsNotNone(row.def_tokens)
 
+    def test_unmatched_enabled_tools_are_reported(self) -> None:
+        config = self._config(
+            sys.executable,
+            [FAKE_SERVER, "serve"],
+            enabled_tools=["first_tool", "typo_tool", "gone_tool"],
+        )
+
+        result = list_server_tools(config, timeout=5)
+
+        self.assertEqual(result.status, "ok")
+        # first_tool is live; the other two names match no returned tool.
+        self.assertEqual(
+            result.unmatched_enabled_tools, ["gone_tool", "typo_tool"]
+        )
+
+    def test_no_allowlist_reports_no_unmatched_tools(self) -> None:
+        config = self._config(sys.executable, [FAKE_SERVER, "serve"])
+
+        result = list_server_tools(config, timeout=5)
+
+        self.assertEqual(result.status, "ok")
+        self.assertEqual(result.unmatched_enabled_tools, [])
+
     def test_timeout_returns_error_and_stops_child(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             pid_path = os.path.join(directory, "server.pid")
