@@ -20,7 +20,7 @@ def discover_servers(
     warnings: list[str] = []
     user_path = os.path.join(home, ".codex", "config.toml")
     if project_dir is not None:
-        _report_project_layer(project_dir, warnings)
+        _report_project_layer(project_dir, user_path, warnings)
 
     config = _read_toml_object(user_path, warnings)
     if config is None:
@@ -36,7 +36,9 @@ def discover_servers(
     return servers, warnings
 
 
-def _report_project_layer(project_dir: str, warnings: list[str]) -> None:
+def _report_project_layer(
+    project_dir: str, user_path: str, warnings: list[str]
+) -> None:
     """Report a project-layer Codex config as a conditional inventory.
 
     The project layer is read and its server names are listed, but it is
@@ -51,6 +53,10 @@ def _report_project_layer(project_dir: str, warnings: list[str]) -> None:
 
     project_path = os.path.join(project_dir, ".codex", "config.toml")
     if not os.path.exists(project_path):
+        return
+    # When --project points at the home directory, the "project" config file is
+    # literally the user config; do not re-report it as a separate layer.
+    if _same_file(project_path, user_path):
         return
     config = _read_toml_object(project_path, warnings)
     if config is None:
@@ -74,6 +80,15 @@ def _report_project_layer(project_dir: str, warnings: list[str]) -> None:
         "semantics are undocumented, so these are shown as a conditional "
         "inventory only."
     )
+
+
+def _same_file(left: str, right: str) -> bool:
+    try:
+        return os.path.samefile(left, right)
+    except OSError:
+        return os.path.normcase(os.path.abspath(left)) == os.path.normcase(
+            os.path.abspath(right)
+        )
 
 
 def _read_toml_object(

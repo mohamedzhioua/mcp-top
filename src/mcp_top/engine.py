@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from mcp_top.config import ServerConfig
 from mcp_top.counter import UsageWindow
@@ -32,11 +32,44 @@ class ServerRow:
 
 
 @dataclass
+class Reactivation:
+    """A lower-precedence server that would become active if a winner is removed."""
+
+    server: str
+    scope: str
+    source_path: str
+
+
+@dataclass
+class PruneSuggestion:
+    """A safe, serializable prune recommendation for one server.
+
+    ``kind`` is ``"suggestion"`` only for a clean, global-scope removal whose
+    estimated net saving equals the winner's measured definition cost.
+    Everything else is a ``"candidate"`` that needs review: ``net_tokens`` is
+    ``None`` and ``reasons`` explains why. This object deliberately carries no
+    ``env``/``args`` -- it is derived from ``ServerConfig`` but never exposes
+    its secrets.
+    """
+
+    kind: str
+    server: str
+    scope: str
+    source_path: str
+    gross_tokens: int
+    gross_exact: bool
+    net_tokens: int | None
+    reactivates: Reactivation | None
+    reasons: list[str]
+
+
+@dataclass
 class CliReport:
     cli: str
     rows: list[ServerRow]
     window: UsageWindow | None
     coverage: Coverage
+    suggestions: list[PruneSuggestion] = field(default_factory=list)
 
 
 @dataclass
@@ -151,6 +184,7 @@ def build_cli_report(
             row.server,
         )
     )
+    suggestions = _prune_suggestions(rows, servers, config_warnings)
     return CliReport(
         cli=cli_name,
         rows=rows,
@@ -162,7 +196,89 @@ def build_cli_report(
             config_warnings,
             usage_note,
         ),
+        suggestions=suggestions,
     )
+
+
+def _prune_suggestions(
+    rows: list[ServerRow],
+    servers: list[ServerConfig],
+    config_warnings: list[str] | None,
+) -> list[PruneSuggestion]:
+    """Classify prune-verdict rows into clean suggestions and review candidates.
+
+    A clean ``suggestion`` requires a global (``user``) scope -- the only scope
+    whose home-wide zero-call count is a valid denominator, since usage is not
+    attributed per project in v0.3 -- with complete provenance and no enabled
+    lower-precedence entry that would reactivate on deletion. Everything else is
+    a ``candidate`` whose estimated net saving is unknown.
+    """
+
+    config_by_name = {server.name: server for server in servers}
+    provenance_incomplete = any(
+        "could not parse" in warning or "could not read" in warning
+        for warning in (config_warnings or [])
+    )
+    suggestions: list[PruneSuggestion] = []
+    for row in rows:
+        if row.verdict != "prune" or row.def_tokens is None:
+            continue
+        if row.def_tokens.tokens <= 0:
+            # "save ~0" is not useful; skip measured zero-cost rows.
+            continue
+        cfg = config_by_name.get(row.server)
+        if cfg is None:
+            continue
+
+        reasons: list[str] = []
+        reactivation: Reactivation | None = None
+
+        # An enabled immediate shadow reactivates on deletion; a disabled one
+        # becomes the (uncosted) winner and blocks deeper layers, so it does
+        # not reactivate anything.
+        if cfg.shadowed:
+            immediate = cfg.shadowed[0]
+            if immediate.enabled is not False:
+                reactivation = Reactivation(
+                    server=immediate.name,
+                    scope=immediate.scope,
+                    source_path=immediate.source_path,
+                )
+                reasons.append(
+                    f"deleting this reactivates {immediate.scope}-scope "
+                    f"'{immediate.name}' from {immediate.source_path}; net "
+                    "saving is unknown -- it may be lower, unchanged, or higher"
+                )
+
+        if cfg.scope != "user":
+            reasons.append(
+                "usage is not attributed per-project in v0.3, so 0 calls may "
+                "reflect sessions from other projects; verify this server is "
+                "unused in this project before removing"
+            )
+
+        if provenance_incomplete:
+            reasons.append(
+                "a config layer for this CLI could not be parsed, so a "
+                "shadowing or shadowed entry may be missing; treat removal as "
+                "unverified"
+            )
+
+        kind = "suggestion" if not reasons else "candidate"
+        suggestions.append(
+            PruneSuggestion(
+                kind=kind,
+                server=row.server,
+                scope=cfg.scope,
+                source_path=cfg.source_path,
+                gross_tokens=row.def_tokens.tokens,
+                gross_exact=row.def_tokens.exact,
+                net_tokens=row.def_tokens.tokens if kind == "suggestion" else None,
+                reactivates=reactivation,
+                reasons=reasons,
+            )
+        )
+    return suggestions
 
 
 def build_report(

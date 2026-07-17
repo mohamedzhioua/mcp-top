@@ -18,12 +18,13 @@ from mcp_top.coverage import render_coverage_text
 from mcp_top.engine import (
     CliReport,
     CliReportInput,
+    PruneSuggestion,
     Report,
     ServerRow,
     build_report,
 )
 from mcp_top.mcpclient import ServerTools, list_server_tools
-from mcp_top.tokens import fmt
+from mcp_top.tokens import TokenCount, fmt
 
 
 CLIS = {
@@ -91,9 +92,14 @@ def main(argv: list[str] | None = None) -> int:
     try:
         report = _build(args)
         if args.json:
-            print(json.dumps(_report_json(report), sort_keys=True))
+            print(
+                json.dumps(
+                    _report_json(report, include_prune=args.prune),
+                    sort_keys=True,
+                )
+            )
         else:
-            print(_render_human(report))
+            print(_render_human(report, include_prune=args.prune))
         return 0
     except Exception as err:
         print(f"mcp-top: internal error: {err}", file=sys.stderr)
@@ -122,6 +128,14 @@ def _parser() -> argparse.ArgumentParser:
         help="do not launch configured MCP servers",
     )
     parser.add_argument("--json", action="store_true", help="emit JSON")
+    parser.add_argument(
+        "--prune",
+        action="store_true",
+        help=(
+            "append suggested removals and review candidates; never applied "
+            "(mcp-top is read-only)"
+        ),
+    )
     parser.add_argument(
         "--version", action="version", version=f"%(prog)s {__version__}"
     )
@@ -211,18 +225,20 @@ def _load_server_tools(
     return list_server_tools(server, timeout=server.query_timeout or timeout)
 
 
-def _report_json(report: Report) -> dict:
+def _report_json(report: Report, include_prune: bool = False) -> dict:
     payload = {
         "schema": "mcp-top/v2",
         "generated_note": report.generated_note,
-        "clis": [_cli_json(cli_report) for cli_report in report.clis],
+        "clis": [
+            _cli_json(cli_report, include_prune) for cli_report in report.clis
+        ],
     }
     if report.note is not None:
         payload["note"] = report.note
     return payload
 
 
-def _cli_json(cli_report: CliReport) -> dict:
+def _cli_json(cli_report: CliReport, include_prune: bool = False) -> dict:
     window = None
     if cli_report.window is not None:
         window = {
@@ -230,11 +246,38 @@ def _cli_json(cli_report: CliReport) -> dict:
             "days": cli_report.window.window_days,
             "sessions_considered": cli_report.window.sessions_considered,
         }
-    return {
+    entry = {
         "cli": cli_report.cli,
         "window": window,
         "coverage": asdict(cli_report.coverage),
         "servers": [_row_json(row) for row in cli_report.rows],
+    }
+    if include_prune:
+        # Additive field: appears only with --prune, so plain --json stays
+        # byte-for-byte identical and the schema remains mcp-top/v2.
+        entry["suggested_removals"] = [
+            _suggestion_json(item) for item in cli_report.suggestions
+        ]
+    return entry
+
+
+def _suggestion_json(item: PruneSuggestion) -> dict:
+    reactivates = None
+    if item.reactivates is not None:
+        reactivates = {
+            "server": item.reactivates.server,
+            "scope": item.reactivates.scope,
+            "source_path": item.reactivates.source_path,
+        }
+    return {
+        "kind": item.kind,
+        "server": item.server,
+        "scope": item.scope,
+        "source_path": item.source_path,
+        "gross_tokens": {"value": item.gross_tokens, "exact": item.gross_exact},
+        "net_tokens": item.net_tokens,
+        "reactivates": reactivates,
+        "reasons": item.reasons,
     }
 
 
@@ -261,7 +304,7 @@ def _row_json(row: ServerRow) -> dict:
     }
 
 
-def _render_human(report: Report) -> str:
+def _render_human(report: Report, include_prune: bool = False) -> str:
     sections = []
     if report.note is not None:
         sections.append(report.note)
@@ -269,12 +312,15 @@ def _render_human(report: Report) -> str:
         _render_cli_human(cli_report, include_header=len(report.clis) > 1)
         for cli_report in report.clis
     ])
+    if include_prune:
+        sections.append(_render_prune_block(report))
     sections.append(report.generated_note)
     return "\n\n".join(sections)
 
 
 def _render_cli_human(cli_report: CliReport, include_header: bool) -> str:
     coverage = render_coverage_text(cli_report.coverage)
+    suggestion_kind = {item.server: item.kind for item in cli_report.suggestions}
     headers = (
         "SERVER",
         "SCOPE",
@@ -286,8 +332,15 @@ def _render_cli_human(cli_report: CliReport, include_header: bool) -> str:
     body = []
     for row in cli_report.rows:
         verdict = row.verdict
-        if row.verdict == "prune" and row.def_tokens is not None:
-            verdict = f"prune -> save {fmt(row.def_tokens)}/session"
+        if row.verdict == "prune":
+            # Provenance-aware: only a clean, global-scope removal earns a
+            # savings figure; everything else is a review candidate and never
+            # asserts a number without its caveats (shown under --prune).
+            kind = suggestion_kind.get(row.server)
+            if kind == "suggestion" and row.def_tokens is not None:
+                verdict = f"prune -> save {fmt(row.def_tokens)}/session"
+            elif kind == "candidate":
+                verdict = "prune candidate"
         if row.filtered_tools:
             verdict = (
                 f"{verdict} "
@@ -336,6 +389,78 @@ def _render_cli_human(cli_report: CliReport, include_header: bool) -> str:
     if breakdown:
         parts.append("\n".join(breakdown))
     return "\n\n".join(parts)
+
+
+def _render_prune_block(report: Report) -> str:
+    """Render the two-tier --prune section: clean suggestions, then candidates.
+
+    Never applied. Suggestions carry an estimated net saving; candidates carry
+    only a gross figure plus the specific reasons they need review. CLIs with
+    no usage adapter are reported explicitly rather than shown as an empty set.
+    """
+
+    lines = [
+        "Suggested removals (never applied; mcp-top is read-only -- edit "
+        "configs yourself):"
+    ]
+    suggestions = [
+        (cli.cli, item)
+        for cli in report.clis
+        for item in cli.suggestions
+        if item.kind == "suggestion"
+    ]
+    if suggestions:
+        for cli_name, item in suggestions:
+            saving = _fmt_tokens(item.net_tokens, item.gross_exact)
+            lines.append(
+                f"  - [{cli_name}] {_ascii(item.server)} ({item.scope}) in "
+                f"{_ascii(item.source_path)} -> est. net saving "
+                f"{saving}/session"
+            )
+        lines.append("  (~ marks a chars/4 estimate, rough error +/-25%)")
+    else:
+        lines.append("  none")
+
+    lines.append("")
+    lines.append("Prune candidates -- review before removing (net saving unknown):")
+    candidates = [
+        (cli.cli, item)
+        for cli in report.clis
+        for item in cli.suggestions
+        if item.kind == "candidate"
+    ]
+    unavailable = [cli.cli for cli in report.clis if cli.window is None]
+    if not candidates and not unavailable:
+        lines.append("  none")
+    for cli_name, item in candidates:
+        gross = _fmt_tokens(item.gross_tokens, item.gross_exact)
+        lines.append(
+            f"  - [{cli_name}] {_ascii(item.server)} ({item.scope}) in "
+            f"{_ascii(item.source_path)} -> removes {gross}/session gross, "
+            "net unknown"
+        )
+        for reason in item.reasons:
+            lines.append(f"      * {_ascii(reason)}")
+    for cli_name in unavailable:
+        lines.append(
+            f"  - [{cli_name}] usage unavailable (no transcript adapter) -- "
+            "no prune analysis"
+        )
+    return "\n".join(lines)
+
+
+def _fmt_tokens(value: int | None, exact: bool) -> str:
+    if value is None:
+        return "unknown"
+    return fmt(TokenCount(tokens=value, exact=exact))
+
+
+def _ascii(text: str) -> str:
+    """Force plain ASCII for terminals with narrow codepages (e.g. cp1252)."""
+
+    return "".join(
+        char if 32 <= ord(char) < 127 else "?" for char in text
+    )
 
 
 def _format_table_row(row: tuple[str, ...], widths: list[int]) -> str:
