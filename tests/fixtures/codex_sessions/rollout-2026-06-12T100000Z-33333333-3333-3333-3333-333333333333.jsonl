@@ -1,0 +1,6 @@
+not json
+{also not json
+still garbage
+[]
+{"timestamp":"2026-06-12T10:00:00Z","type":"session_meta","payload":{"id":"codex-session-garbage","cli_version":"0.144.1"}}
+

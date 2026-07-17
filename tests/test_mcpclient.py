@@ -12,6 +12,7 @@ import unittest
 import _path  # noqa: F401
 
 from mcp_top.config import ServerConfig
+from mcp_top.engine import build_cli_report
 from mcp_top.mcpclient import list_server_tools
 
 
@@ -45,6 +46,19 @@ class McpClientTests(unittest.TestCase):
         )
         self.assertEqual(result.tools, [])
 
+    def test_disabled_server_is_not_launched(self) -> None:
+        config = self._config(
+            "mcp-top-command-that-does-not-exist",
+            [],
+            enabled=False,
+        )
+
+        result = list_server_tools(config)
+
+        self.assertEqual(result.status, "unsupported")
+        self.assertEqual(result.error, "disabled in config -- not queried")
+        self.assertEqual(result.tools, [])
+
     def test_missing_command_returns_error(self) -> None:
         config = self._config("mcp-top-command-that-does-not-exist", [])
 
@@ -53,6 +67,37 @@ class McpClientTests(unittest.TestCase):
         self.assertEqual(result.status, "error")
         self.assertIsNotNone(result.error)
         self.assertEqual(result.tools, [])
+
+    def test_nonexistent_cwd_returns_error_without_launching(self) -> None:
+        config = self._config(
+            sys.executable,
+            [FAKE_SERVER, "serve"],
+            cwd=os.path.join(tempfile.gettempdir(), "mcp-top-missing-cwd"),
+        )
+
+        result = list_server_tools(config)
+
+        self.assertEqual(result.status, "error")
+        self.assertIn("cwd does not exist:", result.error or "")
+        self.assertEqual(result.tools, [])
+
+    def test_tool_filters_hide_tools_before_definition_tokens(self) -> None:
+        config = self._config(
+            sys.executable,
+            [FAKE_SERVER, "serve"],
+            enabled_tools=["first_tool"],
+        )
+
+        result = list_server_tools(config, timeout=5)
+        report = build_cli_report("test", [config], [result], [], None)
+
+        self.assertEqual(result.status, "ok")
+        self.assertEqual([tool["name"] for tool in result.tools], ["first_tool"])
+        self.assertEqual(result.filtered_tools, 1)
+        row = report.rows[0]
+        self.assertEqual(row.tool_count, 1)
+        self.assertEqual(row.filtered_tools, 1)
+        self.assertIsNotNone(row.def_tokens)
 
     def test_timeout_returns_error_and_stops_child(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -102,7 +147,13 @@ class McpClientTests(unittest.TestCase):
             self.assertFalse(self._process_exists(grandchild_pid))
 
     def _config(
-        self, command: str | None, args: list[str], transport: str = "stdio"
+        self,
+        command: str | None,
+        args: list[str],
+        transport: str = "stdio",
+        enabled: bool = True,
+        enabled_tools: list[str] | None = None,
+        cwd: str | None = None,
     ) -> ServerConfig:
         return ServerConfig(
             name="fake",
@@ -113,6 +164,9 @@ class McpClientTests(unittest.TestCase):
             args=args,
             env={},
             url="https://example.com/mcp" if transport != "stdio" else None,
+            enabled=enabled,
+            enabled_tools=enabled_tools,
+            cwd=cwd,
         )
 
     def _process_exists(self, pid: int) -> bool:

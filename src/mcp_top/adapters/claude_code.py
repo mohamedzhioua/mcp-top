@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import glob
-import json
 import os
 import re
 from typing import Any, Collection
 
 from mcp_top.names import parse_mcp_tool_name
-from mcp_top.transcripts import SessionResult, ToolCall, parse_timestamp
+from mcp_top.transcripts import (
+    SessionResult,
+    ToolCall,
+    parse_timestamp,
+    read_jsonl_records,
+)
 
 
 ADAPTER_NAME = "claude-code"
@@ -21,37 +25,21 @@ def parse_session(
 ) -> SessionResult:
     """Parse one Claude Code transcript, skipping unsafe or damaged formats."""
 
-    try:
-        with open(path, "r", encoding="utf-8") as handle:
-            lines = handle.readlines()
-    except (OSError, UnicodeError) as err:
+    read_result = read_jsonl_records(path)
+    if read_result.error is not None:
         return SessionResult(
             path=path,
             session_id=None,
             status="skipped",
-            skip_reason=f"unreadable: {err}",
+            skip_reason=read_result.error,
             versions_seen=[],
             tool_calls=[],
             first_ts=None,
             last_ts=None,
         )
-
-    records: list[dict[str, Any]] = []
-    non_empty_lines = 0
-    bad_lines = 0
-    for line in lines:
-        if not line.strip():
-            continue
-        non_empty_lines += 1
-        try:
-            record = json.loads(line)
-        except (json.JSONDecodeError, UnicodeError, RecursionError, ValueError):
-            bad_lines += 1
-            continue
-        if not isinstance(record, dict):
-            bad_lines += 1
-            continue
-        records.append(record)
+    records = read_result.records
+    non_empty_lines = read_result.non_empty_lines
+    bad_lines = read_result.bad_lines
 
     versions_seen: list[str] = []
     malformed_version = False

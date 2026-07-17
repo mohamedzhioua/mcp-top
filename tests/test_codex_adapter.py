@@ -1,0 +1,98 @@
+"""Unit tests for the Codex transcript adapter."""
+
+from __future__ import annotations
+
+import os
+import tempfile
+import unittest
+
+import _path  # noqa: F401
+
+from mcp_top.adapters.codex import find_transcripts, parse_session, session_key
+
+
+FIXTURES = os.path.join(os.path.dirname(__file__), "fixtures", "codex_sessions")
+GOOD = os.path.join(
+    FIXTURES,
+    "rollout-2026-06-10T100000Z-11111111-1111-1111-1111-111111111111.jsonl",
+)
+
+
+class CodexAdapterTests(unittest.TestCase):
+    def test_admits_session_meta_and_extracts_attributed_calls(self) -> None:
+        result = parse_session(GOOD)
+
+        self.assertEqual(result.status, "parsed")
+        self.assertIsNone(result.skip_reason)
+        self.assertEqual(result.session_id, "codex-session-1")
+        self.assertEqual(result.versions_seen, ["0.144.1"])
+        self.assertEqual(result.duplicate_tool_use, 1)
+        self.assertEqual(result.first_ts, "2026-06-10T10:00:00Z")
+        self.assertEqual(result.last_ts, "2026-06-10T10:06:00Z")
+        self.assertEqual(
+            [call.raw for call in result.tool_calls],
+            ["get_issue", "custom_builtin", "shell_command", "mystery", "spawn_agent"],
+        )
+
+        github = result.tool_calls[0]
+        self.assertEqual(github.kind, "mcp")
+        self.assertEqual(github.server, "github")
+        self.assertEqual(github.tool, "get_issue")
+        self.assertFalse(github.sidechain)
+
+        self.assertEqual(result.tool_calls[1].kind, "builtin")
+        self.assertEqual(result.tool_calls[2].kind, "builtin")
+        # Bare "mcp__" namespace: MCP evidence with no server identity.
+        self.assertEqual(result.tool_calls[3].kind, "mcp-unattributed")
+        # Non-mcp namespaces (observed: "collaboration") are builtin groups.
+        self.assertEqual(result.tool_calls[4].kind, "builtin")
+
+    def test_file_without_session_meta_is_skipped(self) -> None:
+        result = parse_session(
+            os.path.join(
+                FIXTURES,
+                "rollout-2026-06-11T100000Z-22222222-2222-2222-2222-222222222222.jsonl",
+            )
+        )
+
+        self.assertEqual(result.status, "skipped")
+        self.assertEqual(result.skip_reason, "no session metadata found")
+        self.assertEqual(result.versions_seen, [])
+
+    def test_mostly_unparseable_file_is_skipped(self) -> None:
+        result = parse_session(
+            os.path.join(
+                FIXTURES,
+                "rollout-2026-06-12T100000Z-33333333-3333-3333-3333-333333333333.jsonl",
+            )
+        )
+
+        self.assertEqual(result.status, "skipped")
+        self.assertEqual(result.skip_reason, "4 of 5 lines unparseable")
+        self.assertEqual(result.bad_lines, 4)
+        self.assertEqual(result.versions_seen, ["0.144.1"])
+        self.assertEqual(result.tool_calls, [])
+
+    def test_find_transcripts_and_session_key(self) -> None:
+        with tempfile.TemporaryDirectory() as home:
+            session_dir = os.path.join(home, ".codex", "sessions", "2026", "06", "10")
+            os.makedirs(session_dir)
+            paths = [
+                os.path.join(session_dir, "rollout-b.jsonl"),
+                os.path.join(session_dir, "rollout-a.jsonl"),
+            ]
+            for path in paths:
+                with open(path, "w", encoding="utf-8"):
+                    pass
+            with open(os.path.join(session_dir, "ignored.jsonl"), "w", encoding="utf-8"):
+                pass
+
+            found = find_transcripts(home)
+
+        self.assertEqual(found, sorted(paths))
+        self.assertEqual(session_key(paths[0], home), "rollout-b")
+
+
+if __name__ == "__main__":
+    unittest.main()
+

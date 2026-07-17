@@ -17,7 +17,7 @@ _MISSING = object()
 
 @dataclass
 class ServerConfig:
-    """A configured MCP server from the winning Claude Code config scope."""
+    """A configured MCP server from the winning CLI config scope."""
 
     name: str
     scope: str
@@ -27,6 +27,11 @@ class ServerConfig:
     args: list[str]
     env: dict[str, str]
     url: str | None
+    enabled: bool = True
+    enabled_tools: list[str] | None = None
+    disabled_tools: list[str] | None = None
+    cwd: str | None = None
+    query_timeout: float | None = None
 
 
 def discover_servers(
@@ -128,12 +133,16 @@ def _merge_servers(
 
 
 def _server_configs_from_mapping(
-    mapping: Any, scope: str, source_path: str, warnings: list[str]
+    mapping: Any,
+    scope: str,
+    source_path: str,
+    warnings: list[str],
+    mapping_name: str = "mcpServers",
 ) -> list[ServerConfig]:
     if mapping is _MISSING:
         return []
     if not isinstance(mapping, dict):
-        warnings.append(f"{source_path}: mcpServers is not an object")
+        warnings.append(f"{source_path}: {mapping_name} is not an object")
         return []
 
     configs: list[ServerConfig] = []
@@ -172,7 +181,18 @@ def _server_config_from_spec(
         args=_string_list(spec.get("args")),
         env=_string_dict(spec.get("env")),
         url=url if isinstance(url, str) else None,
+        enabled=spec.get("enabled") if isinstance(spec.get("enabled"), bool) else True,
+        enabled_tools=_optional_string_list(spec.get("enabled_tools")),
+        disabled_tools=_optional_string_list(spec.get("disabled_tools")),
+        cwd=spec.get("cwd") if isinstance(spec.get("cwd"), str) else None,
+        query_timeout=_optional_number(spec.get("startup_timeout_sec")),
     )
+
+
+def _optional_string_list(value: Any) -> list[str] | None:
+    if value is None:
+        return None
+    return _string_list(value)
 
 
 def _string_list(value: Any) -> list[str]:
@@ -189,6 +209,12 @@ def _string_dict(value: Any) -> dict[str, str]:
         for key, item in value.items()
         if isinstance(key, str) and isinstance(item, str)
     }
+
+
+def _optional_number(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
 
 
 def _same_config_path(left: str, right: str) -> bool:

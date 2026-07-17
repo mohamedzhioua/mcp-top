@@ -199,8 +199,31 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         self.assertIn(
-            "  github: definitions unavailable — skipped by --no-query",
+            "  github: definitions unavailable -- skipped by --no-query",
             output,
+        )
+
+    def test_all_autodetects_claude_and_codex_with_independent_sections(self) -> None:
+        self._install_codex_fixture()
+
+        human_exit, human = self._run("--no-query")
+        json_exit, json_output = self._run("--json", "--no-query")
+
+        self.assertEqual(human_exit, 0)
+        self.assertIn("=== claude-code ===", human)
+        self.assertIn("=== codex ===", human)
+        self.assertEqual(json_exit, 0)
+        payload = json.loads(json_output)
+        self.assertEqual(
+            [cli_payload["cli"] for cli_payload in payload["clis"]],
+            ["claude-code", "codex"],
+        )
+        by_cli = {cli_payload["cli"]: cli_payload for cli_payload in payload["clis"]}
+        self.assertEqual(by_cli["claude-code"]["coverage"]["transcripts_found"], 2)
+        self.assertEqual(by_cli["codex"]["coverage"]["transcripts_found"], 3)
+        self.assertNotEqual(
+            by_cli["claude-code"]["coverage"],
+            by_cli["codex"]["coverage"],
         )
 
     def test_zero_sessions_is_argparse_usage_error(self) -> None:
@@ -244,6 +267,22 @@ class CliTests(unittest.TestCase):
         with contextlib.redirect_stdout(output):
             exit_code = cli.main(args)
         return exit_code, output.getvalue()
+
+    def _install_codex_fixture(self) -> None:
+        codex_dir = os.path.join(self.home, ".codex")
+        os.makedirs(codex_dir)
+        shutil.copyfile(
+            os.path.join(FIXTURES, "codex_config.toml"),
+            os.path.join(codex_dir, "config.toml"),
+        )
+        session_dir = os.path.join(codex_dir, "sessions", "2026", "06", "10")
+        os.makedirs(session_dir)
+        source_dir = os.path.join(FIXTURES, "codex_sessions")
+        for filename in os.listdir(source_dir):
+            shutil.copyfile(
+                os.path.join(source_dir, filename),
+                os.path.join(session_dir, filename),
+            )
 
 
 if __name__ == "__main__":

@@ -25,11 +25,19 @@ class ServerTools:
     status: str
     error: str | None
     tools: list[dict]
+    filtered_tools: int = 0
 
 
 def list_server_tools(cfg: ServerConfig, timeout: float = 20.0) -> ServerTools:
     """Query one stdio server for all tool definitions without leaking errors."""
 
+    if cfg.enabled is False:
+        return ServerTools(
+            server=cfg.name,
+            status="unsupported",
+            error="disabled in config -- not queried",
+            tools=[],
+        )
     if cfg.transport != "stdio":
         return ServerTools(
             server=cfg.name,
@@ -42,6 +50,13 @@ def list_server_tools(cfg: ServerConfig, timeout: float = 20.0) -> ServerTools:
             server=cfg.name,
             status="error",
             error="stdio server has no command",
+            tools=[],
+        )
+    if cfg.cwd is not None and not os.path.isdir(cfg.cwd):
+        return ServerTools(
+            server=cfg.name,
+            status="error",
+            error=f"cwd does not exist: {cfg.cwd}",
             tools=[],
         )
 
@@ -66,6 +81,7 @@ def list_server_tools(cfg: ServerConfig, timeout: float = 20.0) -> ServerTools:
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             env={**os.environ, **cfg.env},
+            cwd=cfg.cwd,
             **popen_kwargs,
         )
         if process.stdin is None or process.stdout is None:
@@ -129,11 +145,14 @@ def list_server_tools(cfg: ServerConfig, timeout: float = 20.0) -> ServerTools:
             request_id += 1
             params = {"cursor": cursor}
 
+        filtered_tools, hidden = _apply_tool_filters(tools, cfg)
+
         return ServerTools(
             server=cfg.name,
             status="ok",
             error=None,
-            tools=tools,
+            tools=filtered_tools,
+            filtered_tools=hidden,
         )
     except TimeoutError as err:
         return ServerTools(
@@ -173,6 +192,28 @@ def _send(stream: IO[bytes], message: dict[str, Any]) -> None:
         (json.dumps(message, separators=(",", ":")) + "\n").encode("utf-8")
     )
     stream.flush()
+
+
+def _apply_tool_filters(
+    tools: list[dict], cfg: ServerConfig
+) -> tuple[list[dict], int]:
+    original_count = len(tools)
+    filtered = tools
+    if cfg.enabled_tools is not None:
+        enabled = set(cfg.enabled_tools)
+        filtered = [
+            tool for tool in filtered if isinstance(tool.get("name"), str)
+            and tool.get("name") in enabled
+        ]
+    if cfg.disabled_tools is not None:
+        disabled = set(cfg.disabled_tools)
+        filtered = [
+            tool for tool in filtered if not (
+                isinstance(tool.get("name"), str)
+                and tool.get("name") in disabled
+            )
+        ]
+    return filtered, original_count - len(filtered)
 
 
 def _read_stdout(
