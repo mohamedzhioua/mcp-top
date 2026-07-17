@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from mcp_top.counter import UsageWindow
 from mcp_top.mcpclient import ServerTools
@@ -30,6 +30,9 @@ class Coverage:
     unattributed_mcp_calls: int = 0
     servers_unsupported: int = 0
     usage_note: str | None = None
+    unmatched_enabled_tools: list[tuple[str, list[str]]] = field(
+        default_factory=list
+    )
 
 
 def build_coverage(
@@ -57,7 +60,7 @@ def build_coverage(
     in_window: int | None = None
     future_sessions = 0
     if window is None:
-        usage_note = usage_note or "no transcript adapter for this CLI in v0.2"
+        usage_note = usage_note or "no transcript adapter for this CLI"
     else:
         total_tool_calls = sum(window.counts.values())
         mcp_tool_calls = sum(
@@ -111,6 +114,11 @@ def build_coverage(
             1 for result in server_tools_list if result.status == "unsupported"
         ),
         usage_note=usage_note,
+        unmatched_enabled_tools=[
+            (result.server, list(result.unmatched_enabled_tools))
+            for result in server_tools_list
+            if result.status == "ok" and result.unmatched_enabled_tools
+        ],
     )
 
 
@@ -163,6 +171,11 @@ def render_coverage_text(cov: Coverage) -> str:
         )
     if cov.usage_note is not None:
         lines.append(f"  usage: {cov.usage_note}")
+    for server, names in cov.unmatched_enabled_tools:
+        lines.append(
+            f"  {server}: enabled_tools names not returned by this "
+            f"tools/list snapshot: {', '.join(names)}"
+        )
     for path, reason in cov.transcripts_skipped:
         lines.append(f"  skipped {_shorten_transcript_path(path)}: {reason}")
     for server, error in cov.servers_query_failed:

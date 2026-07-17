@@ -137,7 +137,7 @@ class CliTests(unittest.TestCase):
                         servers_queried_ok=0,
                         servers_query_failed=[],
                         config_warnings=[],
-                        usage_note="no transcript adapter for this CLI in v0.2",
+                        usage_note="no transcript adapter for this CLI",
                     ),
                 )
             ],
@@ -269,13 +269,11 @@ class CliTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         payload = json.loads(output)
         self.assertEqual([entry["cli"] for entry in payload["clis"]], ["codex"])
-        self.assertEqual(
-            payload["clis"][0]["coverage"]["config_warnings"],
-            [
-                "project-layer codex config present but not read in v0.2 "
-                "(user scope only)"
-            ],
-        )
+        warnings = payload["clis"][0]["coverage"]["config_warnings"]
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("project-layer codex config", warnings[0])
+        self.assertIn("project_only", warnings[0])
+        self.assertIn("not queried and not merged", warnings[0])
 
     def test_all_without_detection_reports_note_and_empty_clis(self) -> None:
         with tempfile.TemporaryDirectory() as home:
@@ -323,6 +321,104 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 2)
         self.assertIn("Python 3.11 or newer", stderr.getvalue())
+
+    def test_prune_json_is_additive_and_leaks_no_secrets(self) -> None:
+        self._set_servers(
+            {
+                "github": {
+                    "command": sys.executable,
+                    "args": [FAKE_SERVER, "serve"],
+                },
+                "unused": {
+                    "command": sys.executable,
+                    "args": [FAKE_SERVER, "serve"],
+                    "env": {"SECRET_TOKEN": "do-not-leak"},
+                },
+            }
+        )
+
+        _, plain = self._run("--json")
+        plain_cli = json.loads(plain)["clis"][0]
+        # Contract: suggested_removals is --prune-only; schema stays v2.
+        self.assertNotIn("suggested_removals", plain_cli)
+
+        _, pruned = self._run("--json", "--prune")
+        payload = json.loads(pruned)
+        self.assertEqual(payload["schema"], "mcp-top/v2")
+        cli_entry = payload["clis"][0]
+        self.assertIn("suggested_removals", cli_entry)
+        unused = next(
+            item
+            for item in cli_entry["suggested_removals"]
+            if item["server"] == "unused"
+        )
+        self.assertEqual(unused["kind"], "suggestion")
+        self.assertEqual(unused["net_tokens"], unused["gross_tokens"]["value"])
+        self.assertIsNone(unused["reactivates"])
+        # No env/args/command ever surface in a suggestion.
+        self.assertEqual(
+            set(unused),
+            {
+                "kind",
+                "server",
+                "scope",
+                "source_path",
+                "gross_tokens",
+                "net_tokens",
+                "reactivates",
+                "reasons",
+            },
+        )
+        self.assertNotIn("do-not-leak", pruned)
+
+    def test_prune_human_flags_reactivation_candidate(self) -> None:
+        self._set_servers(
+            {
+                "shared": {
+                    "command": sys.executable,
+                    "args": [FAKE_SERVER, "serve"],
+                }
+            },
+            project_servers={
+                "shared": {
+                    "command": sys.executable,
+                    "args": [FAKE_SERVER, "serve"],
+                }
+            },
+        )
+
+        _, output = self._run("--prune")
+
+        self.assertIn("Prune candidates", output)
+        self.assertIn("shared", output)
+        self.assertIn("reactivates", output)
+        # The table verdict must not assert a savings number for a candidate.
+        self.assertIn("prune candidate", output)
+        self.assertNotIn("prune -> save", output)
+
+    def test_prune_reports_cursor_usage_unavailable(self) -> None:
+        cursor_dir = os.path.join(self.home, ".cursor")
+        os.makedirs(cursor_dir)
+        with open(
+            os.path.join(cursor_dir, "mcp.json"), "w", encoding="utf-8"
+        ) as handle:
+            json.dump({"mcpServers": {"c1": {"command": "x"}}}, handle)
+
+        _, output = self._run("--prune", "--no-query")
+
+        self.assertIn("usage unavailable", output)
+        self.assertIn("cursor", output)
+
+    def _set_servers(self, servers: dict, project_servers: dict | None = None) -> None:
+        with open(
+            os.path.join(self.home, ".claude.json"), "w", encoding="utf-8"
+        ) as handle:
+            json.dump({"mcpServers": servers}, handle)
+        if project_servers is not None:
+            with open(
+                os.path.join(self.project, ".mcp.json"), "w", encoding="utf-8"
+            ) as handle:
+                json.dump({"mcpServers": project_servers}, handle)
 
     def _run(self, *extra: str) -> tuple[int, str]:
         return self._run_with_home_project(self.home, self.project, *extra)

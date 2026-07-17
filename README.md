@@ -24,14 +24,14 @@ You can also run the package module directly when `src` is on `PYTHONPATH`:
 PYTHONPATH=src python -m mcp_top
 ```
 
-Example output:
+Example output (real run on the author's machine):
 
 ```text
 $ python bin/mcp-top
 
 === claude-code ===
 
-Coverage: 180 transcripts found, 180 parsed, 0 skipped; 30 in window; 638 tool calls (0 MCP); server queries: 3 ok, 0 failed, 0 not queried
+Coverage: 192 transcripts found, 192 parsed, 0 skipped; 30 in window; 1044 tool calls (0 MCP); server queries: 3 ok, 0 failed, 0 not queried
 
 SERVER      SCOPE  TOOLS  DEF TOKENS  CALLS(window)  VERDICT
 ----------  -----  -----  ----------  -------------  ----------------------------
@@ -41,22 +41,22 @@ context7    user   2      ~1,229      0              prune -> save ~1,229/sessio
 
 === codex ===
 
-Coverage: 110 transcripts found, 110 parsed, 0 skipped; 30 in window; 1139 tool calls (6 MCP); server queries: 4 ok, 0 failed, 0 not queried
+Coverage: 112 transcripts found, 112 parsed, 0 skipped; 30 in window; 1130 tool calls (5 MCP); server queries: 4 ok, 0 failed, 0 not queried
 
 SERVER      SCOPE  TOOLS  DEF TOKENS  CALLS(window)  VERDICT
 ----------  -----  -----  ----------  -------------  ----------------------------
 playwright  user   24     ~4,621      0              prune -> save ~4,621/session
 node_repl   user   3      ~1,475      0              prune -> save ~1,475/session
 context7    user   2      ~1,229      0              prune -> save ~1,229/session
-serena      user   22     ~6,509      6              keep
+serena      user   22     ~6,509      5              keep
 
 serena called tools:
-  - initial_instructions: 6
+  - initial_instructions: 5
 
 === cursor ===
 
 Coverage: 0 transcripts found, 0 parsed, 0 skipped; usage: unknown (no transcript adapter); server queries: 0 ok, 0 failed, 0 not queried
-  usage: Cursor stores chats in undocumented SQLite; no transcript adapter in v0.2 -- usage unknown
+  usage: Cursor stores chats in undocumented SQLite; no transcript adapter -- usage unknown
   config warning: C:\Users\User\.cursor\mcp.json: exists but is empty -- no servers read
 
 SERVER  SCOPE  TOOLS  DEF TOKENS  CALLS(window)  VERDICT
@@ -64,6 +64,49 @@ SERVER  SCOPE  TOOLS  DEF TOKENS  CALLS(window)  VERDICT
 
 Definition token counts use the chars/4 heuristic; ~ means estimate.
 ```
+
+## Prune Suggestions
+
+Add `--prune` to append a suggested-removal block. It is never applied -- `mcp-top`
+is read-only and only tells you which file to edit yourself.
+
+```text
+$ python bin/mcp-top --cli claude-code --prune
+
+Coverage: 192 transcripts found, 192 parsed, 0 skipped; 30 in window; 1045 tool calls (0 MCP); server queries: 3 ok, 0 failed, 0 not queried
+
+SERVER      SCOPE  TOOLS  DEF TOKENS  CALLS(window)  VERDICT
+----------  -----  -----  ----------  -------------  ----------------------------
+serena      user   20     ~6,182      0              prune -> save ~6,182/session
+playwright  user   24     ~4,621      0              prune -> save ~4,621/session
+context7    user   2      ~1,229      0              prune -> save ~1,229/session
+
+Suggested removals (never applied; mcp-top is read-only -- edit configs yourself):
+  - [claude-code] serena (user) in C:\Users\User\.claude.json -> est. net saving ~6,182/session
+  - [claude-code] playwright (user) in C:\Users\User\.claude.json -> est. net saving ~4,621/session
+  - [claude-code] context7 (user) in C:\Users\User\.claude.json -> est. net saving ~1,229/session
+  (~ marks a chars/4 estimate, rough error +/-25%)
+
+Prune candidates -- review before removing (net saving unknown):
+  none
+
+Definition token counts use the chars/4 heuristic; ~ means estimate.
+```
+
+`--prune` splits removals into two honest tiers:
+
+- **Suggested removals** -- a *global* (user-scope) server with a measured definition
+  cost and zero recent calls. Deleting it reactivates nothing, so the estimated net
+  saving equals its definition cost.
+- **Prune candidates** -- everything else that scored `prune` but cannot be recommended
+  cleanly: a project-scoped server (usage is not attributed per project in this release,
+  so zero calls may just reflect other projects), a server whose deletion would
+  *reactivate* a lower-precedence entry of the same name (net saving unknown -- it may
+  even increase), or a config layer that could not be parsed. Each candidate lists its
+  gross definition cost and the exact reason it needs review.
+
+CLIs without a usage adapter (Cursor) are reported as "usage unavailable" rather than an
+empty block.
 
 ## How It Works
 
@@ -92,7 +135,9 @@ Querying definitions launches the configured server commands. `mcp-top` sends re
 
 `--no-query`: do not launch configured MCP servers. Default: off.
 
-`--json`: emit machine-readable JSON schema `mcp-top/v2` instead of the human table. JSON v2 groups results under `clis[]`; each CLI entry has `cli`, `window`, `coverage`, and `servers`. Rows use `usage_status: "no-data"` when transcripts exist or are expected but no usable sessions fall inside the usage window. Coverage usage counters such as `in_window`, `total_tool_calls`, and `mcp_tool_calls` are nullable when usage cannot be measured, such as a CLI without a transcript adapter.
+`--prune`: append a suggested-removal block (human output) or a `suggested_removals` array per CLI (`--json`). Never applied. Default: off.
+
+`--json`: emit machine-readable JSON schema `mcp-top/v2` instead of the human table. JSON v2 groups results under `clis[]`; each CLI entry has `cli`, `window`, `coverage`, and `servers`. Rows use `usage_status: "no-data"` when transcripts exist or are expected but no usable sessions fall inside the usage window. Coverage usage counters such as `in_window`, `total_tool_calls`, and `mcp_tool_calls` are nullable when usage cannot be measured, such as a CLI without a transcript adapter. With `--prune`, each CLI entry gains an additive `suggested_removals` array (`kind`, `server`, `scope`, `source_path`, `gross_tokens`, `net_tokens`, `reactivates`, `reasons`). The schema stays `mcp-top/v2`: all additions are backward-compatible fields (`coverage.unmatched_enabled_tools`, and `suggested_removals` only under `--prune`); no existing field is renamed, retyped, or removed.
 
 `--version`: print the installed version and exit.
 
@@ -110,9 +155,13 @@ Unknown Claude Code transcript format versions are reported and skipped. Codex t
 
 A zero-call verdict is `prune` only when definition cost was actually measured. With unmeasured definition cost, zero calls is `review`. When a CLI has no measurable usage, calls are unknown and the verdict is `unknown`.
 
+`--prune` only presents a clean saving for a global (user-scope) server whose deletion reactivates nothing. Anything else that scored `prune` -- a project-scoped server, a server whose removal would reactivate a lower-precedence entry, or a CLI with an unparsed config layer -- is a review *candidate* with an explicitly unknown net saving, never a recommendation.
+
+`enabled_tools` names that were not returned by a server's `tools/list` snapshot are surfaced in coverage (phrased as "not returned by this snapshot", not an absolute claim). A malformed `enabled_tools`/`disabled_tools` value that is not a list is warned about and applies no filter, rather than silently hiding every tool.
+
 ## Verdicts
 
-| Verdict | v0.2 default |
+| Verdict | Default |
 | --- | --- |
 | `prune` | 0 calls with measured definition cost |
 | `review` | 1-3 calls, or 0 calls with unmeasured definition cost |
@@ -124,10 +173,12 @@ A zero-call verdict is `prune` only when definition cost was actually measured. 
 | CLI | Config inventory | Usage adapter |
 | --- | --- | --- |
 | Claude Code | Full: user, user-project, and project scopes | Full: JSONL transcript format `2.x` |
-| Codex | User scope `~/.codex/config.toml`; project-layer `.codex/config.toml` is not read in v0.2 and is reported when present | Rollout JSONL sessions under `~/.codex/sessions/**/rollout-*.jsonl` |
-| Cursor | User `~/.cursor/mcp.json` and project `.cursor/mcp.json` inventory | Not available in v0.2; Cursor stores chats in undocumented per-workspace SQLite, so usage is unknown |
+| Codex | User scope `~/.codex/config.toml`; project-layer `.codex/config.toml` is read and its servers listed as a conditional inventory -- not queried and not merged (see below) | Rollout JSONL sessions under `~/.codex/sessions/**/rollout-*.jsonl` |
+| Cursor | User `~/.cursor/mcp.json` and project `.cursor/mcp.json` inventory | Not available; Cursor stores chats in undocumented per-workspace SQLite, so usage is unknown |
 
-Roadmap: `--prune` suggestion block and additional CLI adapters in upcoming changes; CI threshold mode in v1.0.
+A Codex project-layer `.codex/config.toml` is reported but deliberately not queried or merged: Codex applies project layers only to *trusted* projects (a state `mcp-top` cannot observe), reads a cascade of files from the project root down to the working directory, and field-merges same-name tables, so its per-server precedence cannot be reproduced faithfully from the published spec. See `docs/v0.3-provenance-and-prune.md`.
+
+Roadmap: additional CLI adapters and per-project usage attribution in upcoming changes; a Cursor transcript adapter and CI threshold mode remain deferred.
 
 ## Non-Goals
 

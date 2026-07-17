@@ -82,7 +82,7 @@ class CodexConfigTests(unittest.TestCase):
         self.assertEqual(len(warnings), 1)
         self.assertIn(f"could not parse {config_path}:", warnings[0])
 
-    def test_project_layer_config_warns_but_is_not_read(self) -> None:
+    def test_project_layer_config_listed_as_conditional_inventory(self) -> None:
         with tempfile.TemporaryDirectory() as home:
             codex_dir = os.path.join(home, ".codex")
             os.makedirs(codex_dir)
@@ -100,16 +100,33 @@ class CodexConfigTests(unittest.TestCase):
 
             servers, warnings = discover_servers(home, project)
 
+        # The project-layer server is never merged into the queried set.
         self.assertNotIn("project_only", {server.name for server in servers})
+        inventory = [w for w in warnings if "project-layer codex config" in w]
+        self.assertEqual(len(inventory), 1)
+        note = inventory[0]
+        self.assertIn("project_only", note)
+        self.assertIn("not queried and not merged", note)
+        self.assertIn("conditional inventory", note)
+
+    def test_project_equal_to_home_is_not_a_project_layer(self) -> None:
+        with tempfile.TemporaryDirectory() as home:
+            codex_dir = os.path.join(home, ".codex")
+            os.makedirs(codex_dir)
+            shutil.copyfile(
+                os.path.join(FIXTURES, "codex_config.toml"),
+                os.path.join(codex_dir, "config.toml"),
+            )
+
+            # --project pointing at home resolves the "project" config file to
+            # the user config itself; it must not be reported as a layer.
+            _, warnings = discover_servers(home, home)
+
         self.assertEqual(
-            warnings,
-            [
-                "project-layer codex config present but not read in v0.2 "
-                "(user scope only)"
-            ],
+            [w for w in warnings if "project-layer codex config" in w], []
         )
 
-    def test_project_layer_warning_does_not_require_user_config(self) -> None:
+    def test_project_layer_inventory_does_not_require_user_config(self) -> None:
         with tempfile.TemporaryDirectory() as home:
             project = os.path.join(home, "project")
             project_codex = os.path.join(project, ".codex")
@@ -122,12 +139,66 @@ class CodexConfigTests(unittest.TestCase):
             servers, warnings = discover_servers(home, project)
 
         self.assertEqual(servers, [])
-        self.assertEqual(
-            warnings,
-            [
-                "project-layer codex config present but not read in v0.2 "
-                "(user scope only)"
-            ],
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("project_only", warnings[0])
+        self.assertIn("not queried and not merged", warnings[0])
+
+    def test_same_name_project_layer_sets_resolution_caveat(self) -> None:
+        with tempfile.TemporaryDirectory() as home:
+            codex_dir = os.path.join(home, ".codex")
+            os.makedirs(codex_dir)
+            shutil.copyfile(
+                os.path.join(FIXTURES, "codex_config.toml"),
+                os.path.join(codex_dir, "config.toml"),
+            )
+            project = os.path.join(home, "project")
+            project_codex = os.path.join(project, ".codex")
+            os.makedirs(project_codex)
+            with open(
+                os.path.join(project_codex, "config.toml"), "w", encoding="utf-8"
+            ) as handle:
+                # 'context7' collides with a user-scope server; 'extra' does not.
+                handle.write(
+                    "[mcp_servers.context7]\ncommand = 'x'\n"
+                    "[mcp_servers.extra]\ncommand = 'y'\n"
+                )
+
+            servers, _ = discover_servers(home, project)
+
+        by_name = {server.name: server for server in servers}
+        self.assertIsNotNone(by_name["context7"].resolution_caveat)
+        self.assertIn(
+            "also defines this server", by_name["context7"].resolution_caveat
+        )
+        # A non-colliding user server keeps a clean (None) caveat.
+        self.assertIsNone(by_name["remote_docs"].resolution_caveat)
+
+    def test_unreadable_project_layer_caveats_all_user_servers(self) -> None:
+        with tempfile.TemporaryDirectory() as home:
+            codex_dir = os.path.join(home, ".codex")
+            os.makedirs(codex_dir)
+            shutil.copyfile(
+                os.path.join(FIXTURES, "codex_config.toml"),
+                os.path.join(codex_dir, "config.toml"),
+            )
+            project = os.path.join(home, "project")
+            project_codex = os.path.join(project, ".codex")
+            os.makedirs(project_codex)
+            with open(
+                os.path.join(project_codex, "config.toml"), "w", encoding="utf-8"
+            ) as handle:
+                handle.write("this is = not valid toml [[[")
+
+            servers, warnings = discover_servers(home, project)
+
+        self.assertTrue(
+            all(server.resolution_caveat is not None for server in servers)
+        )
+        self.assertTrue(
+            all(
+                "could not be read" in server.resolution_caveat
+                for server in servers
+            )
         )
 
     def test_malformed_server_fields_warn_and_use_safe_values(self) -> None:

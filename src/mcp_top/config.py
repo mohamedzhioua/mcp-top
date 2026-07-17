@@ -9,16 +9,30 @@ from __future__ import annotations
 import json
 import math
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 
 _MISSING = object()
 
+# Relative precedence of the config scopes, low to high. Only the ordering
+# matters: a higher number wins and shadows lower-numbered same-name entries.
+# Claude Code layers user -> user-project -> project; Cursor user -> project;
+# Codex reads user scope only (its project layer is a conditional inventory and
+# is never merged into this map -- see clis/codex.py).
+_SCOPE_PRECEDENCE = {"user": 0, "user-project": 1, "project": 2}
+
 
 @dataclass
 class ServerConfig:
-    """A configured MCP server from the winning CLI config scope."""
+    """A configured MCP server from the winning CLI config scope.
+
+    ``shadowed`` holds the same-name lower-precedence entries this winner
+    overrides, ordered highest precedence first. It exists so a prune
+    simulation can tell whether deleting this winner would reactivate a
+    lower-precedence server. It is never serialized: ``env`` and ``args`` can
+    carry secrets.
+    """
 
     name: str
     scope: str
@@ -33,6 +47,9 @@ class ServerConfig:
     disabled_tools: list[str] | None = None
     cwd: str | None = None
     query_timeout: float | None = None
+    precedence: int = 0
+    shadowed: tuple["ServerConfig", ...] = ()
+    resolution_caveat: str | None = None
 
 
 def discover_servers(
@@ -123,14 +140,51 @@ def _merge_servers(
     incoming: list[ServerConfig],
     warnings: list[str],
 ) -> None:
+    """Merge incoming servers, recording precedence provenance.
+
+    A strictly higher-precedence entry wins and records the entry it shadows
+    (plus that entry's own chain). An equal-precedence collision -- e.g. two
+    ``projects`` keys that normalize to the same path -- keeps the later
+    definition and warns, but is deliberately not recorded as a shadow, so it
+    can never be mistaken for a lower-scope server that would reactivate on
+    deletion.
+    """
+
     for server in incoming:
         existing = servers.get(server.name)
-        if existing is not None:
+        if existing is None:
+            servers[server.name] = server
+            continue
+        if server.precedence > existing.precedence:
             warnings.append(
                 f"server {server.name!r} from {server.scope} overrides "
                 f"{existing.scope}"
             )
-        servers[server.name] = server
+            server.shadowed = _ordered_chain((existing, *existing.shadowed))
+            servers[server.name] = server
+        elif server.precedence == existing.precedence:
+            warnings.append(
+                f"server {server.name!r} defined more than once at "
+                f"{server.scope} scope -- keeping the later definition"
+            )
+            server.shadowed = existing.shadowed
+            servers[server.name] = server
+        else:
+            # Out-of-order merge: the existing entry outranks the incoming one,
+            # so it stays the winner and the incoming one joins its chain. The
+            # chain is re-sorted so the immediate fallback is always the
+            # highest-precedence shadowed entry regardless of merge order.
+            existing.shadowed = _ordered_chain((*existing.shadowed, server))
+
+
+def _ordered_chain(
+    entries: tuple[ServerConfig, ...]
+) -> tuple[ServerConfig, ...]:
+    """Return a shadow chain ordered highest precedence first (stable)."""
+
+    return tuple(
+        sorted(entries, key=lambda entry: entry.precedence, reverse=True)
+    )
 
 
 def _server_configs_from_mapping(
@@ -200,8 +254,20 @@ def _server_config_from_spec(
         env=_string_dict(spec.get("env"), name, source_path, warnings),
         url=url if isinstance(url, str) else None,
         enabled=enabled,
-        enabled_tools=_optional_string_list(spec.get("enabled_tools")),
-        disabled_tools=_optional_string_list(spec.get("disabled_tools")),
+        enabled_tools=_optional_string_list(
+            spec.get("enabled_tools", _MISSING),
+            name,
+            source_path,
+            warnings,
+            "enabled_tools",
+        ),
+        disabled_tools=_optional_string_list(
+            spec.get("disabled_tools", _MISSING),
+            name,
+            source_path,
+            warnings,
+            "disabled_tools",
+        ),
         cwd=spec.get("cwd") if isinstance(spec.get("cwd"), str) else None,
         query_timeout=_optional_number(
             spec.get("startup_timeout_sec"),
@@ -210,13 +276,33 @@ def _server_config_from_spec(
             warnings,
             "startup_timeout_sec",
         ),
+        precedence=_SCOPE_PRECEDENCE.get(scope, 0),
     )
 
 
-def _optional_string_list(value: Any) -> list[str] | None:
-    if value is None:
+def _optional_string_list(
+    value: Any,
+    server_name: str,
+    source_path: str,
+    warnings: list[str],
+    field_name: str,
+) -> list[str] | None:
+    """Return a string allow/deny list, or ``None`` when absent or malformed.
+
+    A key that is present but not a list is warned about and treated as absent
+    (no filter). Returning an empty list here would silently hide every tool
+    and could produce a misleading zero-cost prune row.
+    """
+
+    if value is _MISSING or value is None:
         return None
-    return _string_list(value)
+    if not isinstance(value, list):
+        warnings.append(
+            f"{source_path}: server {server_name!r} {field_name} is not a "
+            "list -- ignored (no tool filter applied)"
+        )
+        return None
+    return [item for item in value if isinstance(item, str)]
 
 
 def _string_list(
