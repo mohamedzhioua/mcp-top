@@ -1,0 +1,19 @@
+[mcp_servers.context7]
+command = "npx"
+args = ["-y", "@upstash/context7-mcp@3.2.3"]
+enabled_tools = ["resolve-library-id", "get-library-docs"]
+disabled_tools = ["get-library-docs"]
+startup_timeout_sec = 7.5
+cwd = "/tmp"
+
+[mcp_servers.context7.env]
+CONTEXT7_API_KEY = "local"
+
+[mcp_servers.disabled_server]
+command = "python"
+args = ["server.py"]
+enabled = false
+
+[mcp_servers.remote_docs]
+url = "https://example.com/mcp"
+

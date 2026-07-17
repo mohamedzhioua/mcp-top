@@ -28,6 +28,7 @@ class ServerRow:
     usage_status: str
     called_tools: dict[str, int]
     verdict: str
+    filtered_tools: int = 0
 
 
 @dataclass
@@ -54,6 +55,7 @@ class CliReportInput:
     sessions: list[SessionResult]
     window: UsageWindow | None
     config_warnings: list[str] | None = None
+    usage_note: str | None = None
 
 
 def build_cli_report(
@@ -63,6 +65,7 @@ def build_cli_report(
     sessions: list[SessionResult],
     window: UsageWindow | None,
     config_warnings: list[str] | None = None,
+    usage_note: str | None = None,
 ) -> CliReport:
     """Build the ranked report for one CLI.
 
@@ -108,6 +111,7 @@ def build_cli_report(
                 usage_status=usage_status,
                 called_tools=called_tools,
                 verdict=_verdict(calls, result.status, usage_status),
+                filtered_tools=result.filtered_tools,
             )
         )
 
@@ -129,6 +133,7 @@ def build_cli_report(
                     usage_status="measured",
                     called_tools=called_tools,
                     verdict=_verdict(calls, "unsupported", "measured"),
+                    filtered_tools=0,
                 )
             )
 
@@ -149,6 +154,7 @@ def build_cli_report(
             window,
             server_tools_list,
             config_warnings,
+            usage_note,
         ),
     )
 
@@ -165,6 +171,7 @@ def build_report(cli_inputs: list[CliReportInput]) -> Report:
                 item.sessions,
                 item.window,
                 item.config_warnings,
+                item.usage_note,
             )
             for item in cli_inputs
         ],

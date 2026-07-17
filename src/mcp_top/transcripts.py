@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Any
 
 
 @dataclass
@@ -32,6 +34,45 @@ class SessionResult:
     last_ts: str | None
     bad_lines: int = 0
     duplicate_tool_use: int = 0
+
+
+@dataclass
+class JsonlReadResult:
+    """Parsed JSONL records plus non-fatal line damage accounting."""
+
+    records: list[dict[str, Any]]
+    non_empty_lines: int
+    bad_lines: int
+    error: str | None = None
+
+
+def read_jsonl_records(path: str) -> JsonlReadResult:
+    """Read JSONL records, counting malformed non-empty lines."""
+
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            lines = handle.readlines()
+    except (OSError, UnicodeError) as err:
+        return JsonlReadResult([], 0, 0, f"unreadable: {err}")
+
+    records: list[dict[str, Any]] = []
+    non_empty_lines = 0
+    bad_lines = 0
+    for line in lines:
+        if not line.strip():
+            continue
+        non_empty_lines += 1
+        try:
+            record = json.loads(line)
+        except (json.JSONDecodeError, UnicodeError, RecursionError, ValueError):
+            bad_lines += 1
+            continue
+        if not isinstance(record, dict):
+            bad_lines += 1
+            continue
+        records.append(record)
+
+    return JsonlReadResult(records, non_empty_lines, bad_lines)
 
 
 def parse_timestamp(value: str) -> datetime | None:

@@ -37,6 +37,7 @@ def build_coverage(
     window: UsageWindow | None,
     server_tools_list: list[ServerTools],
     config_warnings: list[str] | None = None,
+    usage_note: str | None = None,
 ) -> Coverage:
     """Build coverage facts from parsed sessions and server query results."""
 
@@ -55,9 +56,8 @@ def build_coverage(
     unattributed_mcp_calls = 0
     in_window = 0
     future_sessions = 0
-    usage_note = None
     if window is None:
-        usage_note = "no transcript adapter for this CLI in v0.2"
+        usage_note = usage_note or "no transcript adapter for this CLI in v0.2"
     else:
         total_tool_calls = sum(window.counts.values())
         mcp_tool_calls = sum(

@@ -1,0 +1,8 @@
+{"timestamp":"2026-06-10T10:00:00Z","type":"session_meta","payload":{"id":"codex-session-1","timestamp":"2026-06-10T10:00:00Z","cwd":"/tmp/project","originator":"codex-tui","cli_version":"0.144.1"}}
+{"timestamp":"2026-06-10T10:01:00Z","type":"response_item","payload":{"type":"function_call","name":"get_issue","call_id":"call_1","arguments":"{}","namespace":"mcp__github"}}
+{"timestamp":"2026-06-10T10:02:00Z","type":"response_item","payload":{"type":"function_call","name":"get_issue","call_id":"call_1","arguments":"{}","namespace":"mcp__github"}}
+{"timestamp":"2026-06-10T10:03:00Z","type":"response_item","payload":{"type":"custom_tool_call","name":"custom_builtin","call_id":"call_2","arguments":"{}"}}
+{"timestamp":"2026-06-10T10:04:00Z","type":"response_item","payload":{"type":"function_call","name":"shell_command","call_id":"call_3","arguments":"{}"}}
+{"timestamp":"2026-06-10T10:05:00Z","type":"response_item","payload":{"type":"function_call","name":"mystery","call_id":"call_4","arguments":"{}","namespace":"mcp__"}}
+{"timestamp":"2026-06-10T10:06:00Z","type":"response_item","payload":{"type":"function_call","name":"spawn_agent","call_id":"call_5","arguments":"{}","namespace":"collaboration"}}
+

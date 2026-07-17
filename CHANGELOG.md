@@ -14,6 +14,11 @@ The format is based on Keep a Changelog.
 - Changed JSON output to breaking schema `mcp-top/v2` with nested per-CLI results.
 - Added the `unknown` verdict for unsupported usage.
 
+### Added
+
+- Added Codex CLI support for user-scope `~/.codex/config.toml` inventory and rollout JSONL usage under `~/.codex/sessions`.
+- Added Cursor MCP config inventory for user and project scopes, with usage marked unknown because v0.2 has no Cursor transcript adapter.
+
 ## [0.1.0] - 2026-07-16
 
 ### Added

@@ -42,7 +42,7 @@ Definition token counts use the chars/4 heuristic; ~ means estimate.
 
 ## How It Works
 
-1. Read Claude Code MCP configs across user, user-project, and project scopes.
+1. Read supported CLI MCP configs from local files.
 2. Query each configured stdio server read-only with MCP `initialize` and `tools/list` to fetch its actual tool definitions.
 3. Parse local session transcripts through a versioned adapter and count tool calls in a recent window, defaulting to the last 30 sessions and 30 days.
 4. Join definition cost to recent usage, rank servers, and print `keep`, `review`, `prune`, or `unknown` verdicts.
@@ -63,7 +63,7 @@ Querying definitions launches the configured server commands. `mcp-top` sends re
 
 `--timeout SECONDS`: per-server stdio query timeout. Default: `20.0`.
 
-`--cli NAME`: CLI source to inspect: `claude-code` or `all`. Default: `all`.
+`--cli NAME`: CLI source to inspect: `claude-code`, `codex`, `cursor`, or `all`. Default: `all`. With `all`, only CLIs detected from local config or transcript paths are included.
 
 `--no-query`: do not launch configured MCP servers. Default: off.
 
@@ -81,7 +81,7 @@ Token counts are labeled. `~` means an estimate from the `chars/4` heuristic, wi
 
 `mcp-top` is read-only. It never edits configs, uploads data, or sends telemetry.
 
-Unknown transcript format versions are reported and skipped. They are never guessed into counts that might be wrong.
+Unknown Claude Code transcript format versions are reported and skipped. Codex transcript admission is structural because Codex ships frequently and records the CLI version in session metadata.
 
 A zero-call verdict is `prune` only when definition cost was actually measured. With unmeasured definition cost, zero calls is `review`. When a CLI has no measurable usage, calls are unknown and the verdict is `unknown`.
 
@@ -94,9 +94,13 @@ A zero-call verdict is `prune` only when definition cost was actually measured. 
 | `keep` | More than 3 calls |
 | `unknown` | Usage is unsupported for this CLI/server |
 
-## Adapter Support
+## Supported CLIs
 
-Today, `mcp-top` supports Claude Code JSONL transcripts with format versions `2.x`. Unknown versions surface in the coverage block.
+| CLI | Config inventory | Usage adapter |
+| --- | --- | --- |
+| Claude Code | Full: user, user-project, and project scopes | Full: JSONL transcript format `2.x` |
+| Codex | User scope `~/.codex/config.toml`; project-layer `.codex/config.toml` is not read in v0.2 and is reported when present | Rollout JSONL sessions under `~/.codex/sessions/**/rollout-*.jsonl` |
+| Cursor | User `~/.cursor/mcp.json` and project `.cursor/mcp.json` inventory | Not available in v0.2; Cursor stores chats in undocumented per-workspace SQLite, so usage is unknown |
 
 Roadmap: `--prune` suggestion block and additional CLI adapters in upcoming changes; CI threshold mode in v1.0.
 

@@ -9,11 +9,9 @@ import sys
 from dataclasses import asdict
 
 from mcp_top import __version__
-from mcp_top.adapters.claude_code import (
-    find_transcripts,
-    parse_session,
-    session_key,
-)
+from mcp_top.adapters import claude_code, codex as codex_adapter
+from mcp_top.clis import codex as codex_config
+from mcp_top.clis import cursor as cursor_config
 from mcp_top.config import ServerConfig, discover_servers
 from mcp_top.counter import count_calls
 from mcp_top.coverage import render_coverage_text
@@ -31,10 +29,43 @@ from mcp_top.tokens import fmt
 CLIS = {
     "claude-code": {
         "discover_servers": discover_servers,
-        "find_transcripts": find_transcripts,
-        "parse_session": parse_session,
-        "session_key": session_key,
-    }
+        "find_transcripts": claude_code.find_transcripts,
+        "parse_session": claude_code.parse_session,
+        "session_key": claude_code.session_key,
+        "detected": lambda home, project: (
+            os.path.exists(os.path.join(home, ".claude.json"))
+            or os.path.exists(os.path.join(home, ".claude", "projects"))
+        ),
+    },
+    "codex": {
+        "discover_servers": codex_config.discover_servers,
+        "find_transcripts": codex_adapter.find_transcripts,
+        "parse_session": codex_adapter.parse_session,
+        "session_key": codex_adapter.session_key,
+        "detected": lambda home, project: (
+            os.path.exists(os.path.join(home, ".codex", "config.toml"))
+            or os.path.exists(os.path.join(home, ".codex", "sessions"))
+        ),
+    },
+    "cursor": {
+        "discover_servers": cursor_config.discover_servers,
+        "find_transcripts": None,
+        "parse_session": None,
+        "session_key": None,
+        "usage_note": (
+            "Cursor stores chats in undocumented SQLite; no transcript "
+            "adapter in v0.2 -- usage unknown"
+        ),
+        "detected": lambda home, project: (
+            os.path.exists(os.path.join(home, ".cursor", "mcp.json"))
+            or (
+                project is not None
+                and os.path.exists(
+                    os.path.join(project, ".cursor", "mcp.json")
+                )
+            )
+        ),
+    },
 }
 
 
@@ -88,7 +119,14 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _build(args: argparse.Namespace) -> Report:
-    cli_names = list(CLIS) if args.cli == "all" else [args.cli]
+    if args.cli == "all":
+        cli_names = [
+            name
+            for name, entry in CLIS.items()
+            if entry["detected"](args.home, args.project)
+        ]
+    else:
+        cli_names = [args.cli]
     inputs: list[CliReportInput] = []
     for cli_name in cli_names:
         entry = CLIS[cli_name]
@@ -97,15 +135,28 @@ def _build(args: argparse.Namespace) -> Report:
             _load_server_tools(server, args.no_query, args.timeout)
             for server in servers
         ]
-        paths = entry["find_transcripts"](args.home)
-        configured = {server.name for server in servers}
-        sessions = [entry["parse_session"](path, configured) for path in paths]
-        window = count_calls(
-            sessions,
-            [entry["session_key"](path, args.home) for path in paths],
-            window_sessions=args.sessions,
-            window_days=args.days,
-        )
+        find_transcripts_func = entry["find_transcripts"]
+        parse_session_func = entry["parse_session"]
+        session_key_func = entry["session_key"]
+        if (
+            find_transcripts_func is None
+            or parse_session_func is None
+            or session_key_func is None
+        ):
+            sessions = []
+            window = None
+        else:
+            paths = find_transcripts_func(args.home)
+            configured = {server.name for server in servers}
+            sessions = [
+                parse_session_func(path, configured) for path in paths
+            ]
+            window = count_calls(
+                sessions,
+                [session_key_func(path, args.home) for path in paths],
+                window_sessions=args.sessions,
+                window_days=args.days,
+            )
         inputs.append(
             CliReportInput(
                 cli_name=cli_name,
@@ -114,6 +165,7 @@ def _build(args: argparse.Namespace) -> Report:
                 sessions=sessions,
                 window=window,
                 config_warnings=warnings,
+                usage_note=entry.get("usage_note"),
             )
         )
     return build_report(inputs)
@@ -122,6 +174,13 @@ def _build(args: argparse.Namespace) -> Report:
 def _load_server_tools(
     server: ServerConfig, no_query: bool, timeout: float
 ) -> ServerTools:
+    if server.enabled is False:
+        return ServerTools(
+            server=server.name,
+            status="unsupported",
+            error="disabled in config -- not queried",
+            tools=[],
+        )
     if no_query:
         return ServerTools(
             server=server.name,
@@ -136,7 +195,7 @@ def _load_server_tools(
             error="unsupported transport (this version queries stdio only)",
             tools=[],
         )
-    return list_server_tools(server, timeout=timeout)
+    return list_server_tools(server, timeout=server.query_timeout or timeout)
 
 
 def _report_json(report: Report) -> dict:
@@ -209,6 +268,11 @@ def _render_cli_human(cli_report: CliReport, include_header: bool) -> str:
         verdict = row.verdict
         if row.verdict == "prune" and row.def_tokens is not None:
             verdict = f"prune -> save {fmt(row.def_tokens)}/session"
+        if row.filtered_tools:
+            verdict = (
+                f"{verdict} "
+                f"({row.filtered_tools} tool(s) hidden by config filters)"
+            )
         body.append(
             (
                 row.server,
@@ -231,7 +295,7 @@ def _render_cli_human(cli_report: CliReport, include_header: bool) -> str:
     for row in cli_report.rows:
         if row.def_status != "ok":
             table_lines.append(
-                f"  {row.server}: definitions unavailable — "
+                f"  {row.server}: definitions unavailable -- "
                 f"{row.def_error or 'unknown error'}"
             )
 
