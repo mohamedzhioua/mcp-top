@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
+import shlex
 import sys
 from dataclasses import asdict
 
@@ -78,6 +80,47 @@ CLIS = {
         ),
     },
 }
+
+
+_CODEX_DISABLE_PROGRAM = """\
+import re
+import sys
+from pathlib import Path
+
+p = Path(sys.argv[1])
+h = sys.argv[2]
+lines = p.read_text(encoding="utf-8").splitlines()
+out = []
+inside = False
+wrote = False
+for line in lines:
+    s = line.strip()
+    if s == h:
+        inside = True
+    elif inside and re.match(r"\\s*\\[", line):
+        if not wrote:
+            out.append("enabled = false")
+            wrote = True
+        inside = False
+    if inside and re.match(r"\\s*enabled\\s*=", line):
+        if not wrote:
+            out.append("enabled = false")
+            wrote = True
+        continue
+    out.append(line)
+if inside and not wrote:
+    out.append("enabled = false")
+    wrote = True
+if not wrote:
+    raise SystemExit(f"table not found: {h}")
+p.write_text("\\n".join(out) + "\\n", encoding="utf-8")
+"""
+
+_CODEX_DISABLE_SCRIPT = (
+    "import sys;exec(" + repr(_CODEX_DISABLE_PROGRAM) + ")"
+)
+
+_TOML_BARE_KEY = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -254,12 +297,13 @@ def _cli_json(cli_report: CliReport, include_prune: bool = False) -> dict:
     }
     if include_prune:
         entry["suggested_removals"] = [
-            _suggestion_json(item) for item in cli_report.suggestions
+            _suggestion_json(cli_report.cli, item)
+            for item in cli_report.suggestions
         ]
     return entry
 
 
-def _suggestion_json(item: PruneSuggestion) -> dict:
+def _suggestion_json(cli_name: str, item: PruneSuggestion) -> dict:
     reactivates = None
     if item.reactivates is not None:
         reactivates = {
@@ -280,6 +324,7 @@ def _suggestion_json(item: PruneSuggestion) -> dict:
         "net_tokens": item.net_tokens,
         "reactivates": reactivates,
         "reasons": item.reasons,
+        "recipe": _recipe_json(_remediation_recipe(cli_name, item)),
     }
 
 
@@ -435,6 +480,15 @@ def _render_prune_block(report: Report) -> str:
                 f"{_ascii(item.source_path)} -> "
                 f"{_fmt_removal_range(advertised, upfront)}"
             )
+            recipe = _remediation_recipe(cli_name, item)
+            if recipe["kind"] == "command":
+                lines.append(
+                    f"      command: {_ascii(_shell_join(recipe['argv']))}"
+                )
+            else:
+                lines.append(
+                    f"      edit: {_ascii(recipe['change'])}"
+                )
         lines.append("  (~ marks a chars/4 estimate, rough error +/-25%)")
     else:
         lines.append("  none")
@@ -465,12 +519,133 @@ def _render_prune_block(report: Report) -> str:
         )
         for reason in item.reasons:
             lines.append(f"      * {_ascii(reason)}")
+        recipe = _remediation_recipe(cli_name, item)
+        lines.append(f"      edit: {_ascii(recipe['change'])}")
     for cli_name in unavailable:
         lines.append(
             f"  - [{cli_name}] usage unavailable (no transcript adapter) -- "
             "no prune analysis"
         )
     return "\n".join(lines)
+
+
+def _remediation_recipe(
+    cli_name: str, item: PruneSuggestion
+) -> dict[str, object]:
+    if item.kind != "suggestion":
+        return _guidance_recipe(cli_name, item)
+
+    if cli_name == "claude-code":
+        claude_scope = _claude_cli_scope(item.scope)
+        return {
+            "kind": "command",
+            "source_path": item.source_path,
+            "scope": item.scope,
+            "argv": [
+                "claude",
+                "mcp",
+                "remove",
+                "--scope",
+                claude_scope,
+                item.server,
+            ],
+            "change": (
+                f"Remove {claude_scope}-scope Claude Code MCP server "
+                f"{item.server!r}; source config {item.source_path} "
+                f"({item.scope} scope)."
+            ),
+        }
+
+    if cli_name == "codex":
+        table = _codex_table_header(item.server)
+        return {
+            "kind": "command",
+            "source_path": item.source_path,
+            "scope": item.scope,
+            "argv": [
+                "python",
+                "-c",
+                _CODEX_DISABLE_SCRIPT,
+                item.source_path,
+                table,
+            ],
+            "change": (
+                f"Set enabled = false under {table} in {item.source_path} "
+                f"({item.scope} scope). For a single unused tool, prefer "
+                "disabled_tools in that table."
+            ),
+        }
+
+    return _guidance_recipe(cli_name, item)
+
+
+def _guidance_recipe(cli_name: str, item: PruneSuggestion) -> dict[str, object]:
+    if cli_name == "codex":
+        table = _codex_table_header(item.server)
+        change = (
+            f"Edit {item.source_path} ({item.scope} scope): set "
+            f"enabled = false under {table}. For tool-level pruning, add "
+            "the unused tool name to disabled_tools in that same table."
+        )
+    elif cli_name == "cursor":
+        change = (
+            f"Edit {item.source_path} ({item.scope} scope): review "
+            f"mcpServers.{item.server!r} and disable or remove it in that "
+            "exact mcp.json file only after checking the candidate reasons."
+        )
+    elif cli_name == "claude-code":
+        change = (
+            f"Review {item.source_path} ({item.scope} scope) before changing "
+            f"Claude Code MCP server {item.server!r}; candidates intentionally "
+            "do not include removal commands."
+        )
+    else:
+        change = (
+            f"Review {item.source_path} ({item.scope} scope) before changing "
+            f"MCP server {item.server!r}; candidates intentionally do not "
+            "include commands."
+        )
+    return {
+        "kind": "guidance",
+        "source_path": item.source_path,
+        "scope": item.scope,
+        "change": change,
+    }
+
+
+def _recipe_json(recipe: dict[str, object]) -> dict[str, object]:
+    payload = {
+        "kind": recipe["kind"],
+        "source_path": recipe["source_path"],
+        "scope": recipe["scope"],
+        "change": recipe["change"],
+    }
+    if recipe["kind"] == "command":
+        payload["argv"] = recipe["argv"]
+    return payload
+
+
+def _claude_cli_scope(scope: str) -> str:
+    return {"user-project": "local", "project": "project", "user": "user"}.get(
+        scope,
+        scope,
+    )
+
+
+def _codex_table_header(server_name: str) -> str:
+    return f"[mcp_servers.{_toml_key(server_name)}]"
+
+
+def _toml_key(value: str) -> str:
+    if _TOML_BARE_KEY.fullmatch(value):
+        return value
+    return json.dumps(value, ensure_ascii=True)
+
+
+def _shell_join(argv: object) -> str:
+    if not isinstance(argv, list):
+        return ""
+    return " ".join(shlex.quote(str(part)) for part in argv)
 
 
 def _fmt_token_range(row: ServerRow) -> str:

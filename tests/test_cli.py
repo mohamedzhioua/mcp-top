@@ -16,7 +16,8 @@ import _path  # noqa: F401
 
 from mcp_top import cli
 from mcp_top.coverage import Coverage
-from mcp_top.engine import CliReport, Report, ServerRow
+from mcp_top.counter import UsageWindow
+from mcp_top.engine import CliReport, PruneSuggestion, Report, ServerRow
 
 
 FIXTURES = os.path.join(os.path.dirname(__file__), "fixtures")
@@ -379,8 +380,17 @@ class CliTests(unittest.TestCase):
                 "net_tokens",
                 "reactivates",
                 "reasons",
+                "recipe",
             },
         )
+        recipe = unused["recipe"]
+        self.assertEqual(recipe["kind"], "command")
+        self.assertEqual(
+            recipe["argv"],
+            ["claude", "mcp", "remove", "--scope", "user", "unused"],
+        )
+        self.assertEqual(recipe["source_path"], os.path.join(self.home, ".claude.json"))
+        self.assertEqual(recipe["scope"], "user")
         self.assertNotIn("do-not-leak", pruned)
 
     def test_prune_human_flags_reactivation_candidate(self) -> None:
@@ -407,6 +417,7 @@ class CliTests(unittest.TestCase):
         # The table verdict must not assert a savings number for a candidate.
         self.assertIn("prune candidate", output)
         self.assertNotIn("prune -> save", output)
+        self.assertIn("edit:", output)
 
     def test_prune_reports_cursor_usage_unavailable(self) -> None:
         cursor_dir = os.path.join(self.home, ".cursor")
@@ -420,6 +431,79 @@ class CliTests(unittest.TestCase):
 
         self.assertIn("usage unavailable", output)
         self.assertIn("cursor", output)
+
+    def test_prune_human_shell_quotes_hostile_clean_command(self) -> None:
+        suggestion = self._suggestion("bad 'name; rm -rf /")
+        report = Report(
+            clis=[
+                CliReport(
+                    cli="claude-code",
+                    rows=[],
+                    window=self._usage_window(),
+                    coverage=self._coverage(),
+                    suggestions=[suggestion],
+                )
+            ],
+            generated_note="note",
+        )
+
+        rendered = cli._render_prune_block(report)
+
+        self.assertIn(
+            "claude mcp remove --scope user 'bad '\"'\"'name; rm -rf /'",
+            rendered,
+        )
+
+    def test_candidate_recipe_is_guidance_without_argv(self) -> None:
+        candidate = self._suggestion(
+            "needs-review",
+            kind="candidate",
+            net_tokens=None,
+            reasons=["reactivates another scope"],
+        )
+
+        payload = cli._suggestion_json("claude-code", candidate)
+
+        self.assertEqual(payload["recipe"]["kind"], "guidance")
+        self.assertNotIn("argv", payload["recipe"])
+        self.assertIn("source_path", payload["recipe"])
+        self.assertIn("scope", payload["recipe"])
+
+    def test_codex_recipe_targets_exact_toml_table(self) -> None:
+        suggestion = self._suggestion(
+            'space "quote"; semi',
+            source_path="/home/me/.codex/config.toml",
+        )
+
+        recipe = cli._remediation_recipe("codex", suggestion)
+
+        self.assertEqual(recipe["kind"], "command")
+        self.assertEqual(recipe["source_path"], "/home/me/.codex/config.toml")
+        self.assertEqual(recipe["scope"], "user")
+        self.assertEqual(recipe["argv"][0:2], ["python", "-c"])
+        self.assertNotIn("\n", recipe["argv"][2])
+        self.assertEqual(
+            recipe["argv"][-1],
+            '[mcp_servers."space \\"quote\\"; semi"]',
+        )
+        self.assertIn("enabled = false", recipe["change"])
+
+    def test_cursor_recipe_names_exact_mcp_json_for_guidance(self) -> None:
+        candidate = self._suggestion(
+            "cursor-docs",
+            kind="candidate",
+            source_path="/repo/.cursor/mcp.json",
+            scope="project",
+            net_tokens=None,
+            reasons=["usage unavailable"],
+        )
+
+        recipe = cli._remediation_recipe("cursor", candidate)
+
+        self.assertEqual(recipe["kind"], "guidance")
+        self.assertNotIn("argv", recipe)
+        self.assertIn("/repo/.cursor/mcp.json", recipe["change"])
+        self.assertIn("project scope", recipe["change"])
 
     def _set_servers(self, servers: dict, project_servers: dict | None = None) -> None:
         with open(
@@ -467,6 +551,54 @@ class CliTests(unittest.TestCase):
                 os.path.join(source_dir, filename),
                 os.path.join(session_dir, filename),
             )
+
+    def _suggestion(
+        self,
+        server: str,
+        *,
+        kind: str = "suggestion",
+        source_path: str = "~/.claude.json",
+        scope: str = "user",
+        net_tokens: int | None = 10,
+        reasons: list[str] | None = None,
+    ) -> PruneSuggestion:
+        return PruneSuggestion(
+            kind=kind,
+            server=server,
+            scope=scope,
+            source_path=source_path,
+            gross_tokens=10,
+            gross_exact=False,
+            upfront_floor_tokens=5,
+            upfront_floor_exact=False,
+            net_tokens=net_tokens,
+            reactivates=None,
+            reasons=[] if reasons is None else reasons,
+        )
+
+    def _usage_window(self) -> UsageWindow:
+        return UsageWindow(
+            sessions_considered=1,
+            window_sessions=30,
+            window_days=30,
+            counts={},
+            sidechain_counts={},
+            server_tool_counts={},
+            unattributed_mcp_calls=0,
+        )
+
+    def _coverage(self) -> Coverage:
+        return Coverage(
+            transcripts_found=0,
+            transcripts_parsed=0,
+            transcripts_skipped=[],
+            in_window=None,
+            total_tool_calls=None,
+            mcp_tool_calls=None,
+            servers_queried_ok=0,
+            servers_query_failed=[],
+            config_warnings=[],
+        )
 
 
 if __name__ == "__main__":
