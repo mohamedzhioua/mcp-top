@@ -4,6 +4,52 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog.
 
+## 0.4.0 — 2026-07-18
+
+### Changed
+
+- Replaced fixed per-run definition-tax claims with Tool-Search-era measurement
+  ranges. Reports now distinguish what a server advertises from what may load
+  upfront by showing `advertised_max_tokens`, `upfront_floor_tokens`,
+  `loading_regime`, and `regime_evidence`.
+- Marked the new measurement semantics as beta. The v0.4 release is a
+  soft-launch for compatibility fixtures from real Claude Code, Codex, and
+  Cursor configs before broader promotion in v0.5.
+- Changed JSON output to breaking schema `mcp-top/v3`. There is no v2
+  compatibility flag because v2's point-estimate semantics are misleading for
+  deferred-loading clients.
+
+#### JSON v2 -> v3 migration table
+
+| Old v2 field | New v3 field / why removed |
+| --- | --- |
+| `def_tokens` | Replace with `advertised_max_tokens`, `upfront_floor_tokens`, `loading_regime`, and `regime_evidence`. A single definition-token value can overstate upfront context on deferred-loading clients. |
+| `gross_tokens` | Replace with `removes_advertised_max_tokens`. Removal impact is now expressed as the advertised maximum removed, not a fixed gross saving. |
+| `net_tokens` | Replace with `removes_upfront_floor_tokens`. Net per-run savings are no longer asserted; v3 reports the upfront floor removed and keeps candidate actual savings unknown when precedence or attribution makes the result ambiguous. |
+
+### Added
+
+- Added loading-regime evidence for `deferred`, `upfront`, and `unknown`
+  regimes. Unknown remains a first-class result when local files do not prove a
+  regime.
+- Added remediation recipes to prune output. Clean suggestions get
+  copy-pasteable commands or edit commands; candidates get structured guidance
+  only. Recipes prefer disabling/filtering before deletion and keep raw config
+  args/env out of JSON.
+- Added PyPI packaging with `uvx mcp-top`, `pipx install mcp-top`, and
+  `pip install mcp-top` as supported install paths for v0.4.0. The existing
+  `python bin/mcp-top` clone-and-run path remains supported.
+- Added Trusted Publishing release workflow preparation. Publishing still stays
+  behind the maintainer-owned tag/release gate.
+- Added Claude Code 2KB truncation modeling for tool descriptions and server
+  instructions before token estimation.
+
+### Fixed
+
+- Fixed Claude Code scope precedence: user-project/local config now correctly
+  outranks project config. This can change which same-name server is reported as
+  active and which lower-precedence entry is shown as reactivating.
+
 ## [0.3.0] - 2026-07-17
 
 ### Added
