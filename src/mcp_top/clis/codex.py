@@ -43,8 +43,8 @@ def discover_servers(
 
 def _report_project_layer(
     project_dir: str, user_path: str, warnings: list[str]
-) -> tuple[set[str] | None, bool]:
-    """Report a project-layer Codex config as a conditional inventory.
+) -> tuple[set[str], bool]:
+    """Report the project-layer Codex config as a conditional inventory.
 
     The project layer is read and its server names are listed, but it is
     deliberately not queried and not merged over the user scope. Codex applies
@@ -52,22 +52,29 @@ def _report_project_layer(
     from files -- reads a cascade of files from the project root down to the
     working directory, and field-merges same-name tables. Faithfully
     reproducing that precedence from the published spec is not possible, so the
-    ambiguity is reported rather than guessed. See
-    docs/v0.3-provenance-and-prune.md.
+    ambiguity is reported rather than guessed.
+
+    Only ``<project_dir>/.codex/config.toml`` is inspected: it is the
+    closest-wins (highest-precedence) project layer. mcp-top does not have a
+    project-root concept, so it cannot safely walk the full root-to-cwd cascade
+    without escaping the project into unrelated ancestor directories. A
+    same-name override present only in a lower ancestor cascade file is
+    therefore not detected -- a documented residual (see
+    docs/v0.3-provenance-and-prune.md).
 
     Returns ``(names, unreadable)``: the set of project-layer server names when
-    the file was read, or ``unreadable=True`` when a project file exists but
-    could not be read. Either signal downgrades a same-name user prune to a
-    review candidate, because a trusted project could redefine that server.
+    the file was read, and whether a present project file could not be read.
+    Either signal downgrades a same-name user prune to a review candidate,
+    because a trusted project could redefine that server.
     """
 
     project_path = os.path.join(project_dir, ".codex", "config.toml")
     if not os.path.exists(project_path):
-        return None, False
+        return set(), False
     # When --project points at the home directory, the "project" config file is
     # literally the user config; do not re-report it as a separate layer.
     if _same_file(project_path, user_path):
-        return None, False
+        return set(), False
     config = _read_toml_object(project_path, warnings)
     if config is None:
         # A read/parse warning was already recorded by _read_toml_object.
@@ -75,7 +82,7 @@ def _report_project_layer(
             f"project-layer codex config {project_path} detected but could "
             "not be read -- not queried and not merged"
         )
-        return None, True
+        return set(), True
     mapping = config.get("mcp_servers")
     names = (
         sorted(str(name) for name in mapping if isinstance(name, str))
