@@ -30,6 +30,7 @@ class McpClientTests(unittest.TestCase):
         self.assertEqual(result.server, "fake")
         self.assertEqual(result.status, "ok")
         self.assertIsNone(result.error)
+        self.assertEqual(result.instructions, "Fake server instructions.")
         self.assertEqual(
             [tool["name"] for tool in result.tools], ["first_tool", "second_tool"]
         )
@@ -97,7 +98,8 @@ class McpClientTests(unittest.TestCase):
         row = report.rows[0]
         self.assertEqual(row.tool_count, 1)
         self.assertEqual(row.filtered_tools, 1)
-        self.assertIsNotNone(row.def_tokens)
+        self.assertIsNotNone(row.advertised_max_tokens)
+        self.assertIsNotNone(row.upfront_floor_tokens)
 
     def test_unmatched_enabled_tools_are_reported(self) -> None:
         config = self._config(

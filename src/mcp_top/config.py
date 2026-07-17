@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import math
 import os
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -45,11 +46,14 @@ class ServerConfig:
     enabled: bool = True
     enabled_tools: list[str] | None = None
     disabled_tools: list[str] | None = None
+    always_load: bool = False
     cwd: str | None = None
     query_timeout: float | None = None
     precedence: int = 0
     shadowed: tuple["ServerConfig", ...] = ()
     resolution_caveat: str | None = None
+    loading_regime: str = "unknown"
+    regime_evidence: list[str] = field(default_factory=list)
 
 
 def discover_servers(
@@ -114,6 +118,10 @@ def discover_servers(
                 warnings,
             )
 
+    _apply_claude_loading_regimes(
+        servers.values(),
+        _claude_tool_search_signals(home, project_dir, warnings),
+    )
     return list(servers.values()), warnings
 
 
@@ -244,6 +252,16 @@ def _server_config_from_spec(
             )
             enabled = False
 
+    always_load = False
+    if "alwaysLoad" in spec:
+        if isinstance(spec.get("alwaysLoad"), bool):
+            always_load = spec["alwaysLoad"]
+        else:
+            warnings.append(
+                f"{source_path}: server {name!r} alwaysLoad is not a "
+                "boolean -- ignored"
+            )
+
     return ServerConfig(
         name=name,
         scope=scope,
@@ -254,6 +272,7 @@ def _server_config_from_spec(
         env=_string_dict(spec.get("env"), name, source_path, warnings),
         url=url if isinstance(url, str) else None,
         enabled=enabled,
+        always_load=always_load,
         enabled_tools=_optional_string_list(
             spec.get("enabled_tools", _MISSING),
             name,
@@ -278,6 +297,122 @@ def _server_config_from_spec(
         ),
         precedence=_SCOPE_PRECEDENCE.get(scope, 0),
     )
+
+
+@dataclass(frozen=True)
+class _RegimeSignal:
+    regime: str
+    evidence: str
+    override: bool = False
+
+
+def _claude_tool_search_signals(
+    home: str, project_dir: str | None, warnings: list[str]
+) -> list[_RegimeSignal]:
+    """Return locally observable Claude Code Tool Search settings signals."""
+
+    paths = [os.path.join(home, ".claude", "settings.json")]
+    if project_dir is not None:
+        paths.extend(
+            [
+                os.path.join(project_dir, ".claude", "settings.json"),
+                os.path.join(project_dir, ".claude", "settings.local.json"),
+            ]
+        )
+    signals: list[_RegimeSignal] = []
+    for path in paths:
+        settings = _read_json_object(path, warnings)
+        if settings is None:
+            continue
+        env = settings.get("env")
+        if isinstance(env, dict):
+            beta_value = env.get("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS")
+            if _truthy_env(beta_value):
+                signals.append(
+                    _RegimeSignal(
+                        "upfront",
+                        (
+                            f"{path}:env."
+                            "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS="
+                            f"{beta_value}"
+                        ),
+                        override=True,
+                    )
+                )
+            value = env.get("ENABLE_TOOL_SEARCH")
+            if isinstance(value, str):
+                normalized = value.strip().casefold()
+                evidence = f"{path}:env.ENABLE_TOOL_SEARCH={value}"
+                if normalized == "false":
+                    signals.append(_RegimeSignal("upfront", evidence))
+                elif normalized == "true":
+                    signals.append(_RegimeSignal("deferred", evidence))
+                elif normalized == "auto" or normalized.startswith("auto:"):
+                    signals.append(_RegimeSignal("unknown", evidence))
+                else:
+                    signals.append(_RegimeSignal("unknown", evidence))
+        permissions = settings.get("permissions")
+        if isinstance(permissions, dict):
+            denied = permissions.get("deny")
+            if isinstance(denied, list):
+                for item in denied:
+                    if isinstance(item, str) and _denies_tool_search(item):
+                        signals.append(
+                            _RegimeSignal(
+                                "upfront",
+                                f"{path}:permissions.deny=ToolSearch",
+                            )
+                        )
+                        break
+    return signals
+
+
+def _truthy_env(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if not isinstance(value, str):
+        return False
+    return value.strip().casefold() in {"1", "true", "yes", "on"}
+
+
+def _denies_tool_search(value: str) -> bool:
+    stripped = value.strip()
+    return stripped == "ToolSearch" or stripped.startswith("ToolSearch(")
+
+
+def _apply_claude_loading_regimes(
+    servers: Iterable[ServerConfig], global_signals: list[_RegimeSignal]
+) -> None:
+    """Assign per-server loading regimes from local Claude Code evidence."""
+
+    for server in servers:
+        evidence = [signal.evidence for signal in global_signals]
+        if server.always_load:
+            server.loading_regime = "upfront"
+            server.regime_evidence = [
+                f"{server.source_path}:mcpServers.{server.name}.alwaysLoad=true",
+                *evidence,
+            ]
+            continue
+
+        override_signals = [
+            signal for signal in global_signals if signal.override
+        ]
+        if override_signals:
+            server.loading_regime = "upfront"
+            server.regime_evidence = evidence
+            continue
+
+        regimes = {signal.regime for signal in global_signals}
+        if not regimes:
+            server.loading_regime = "unknown"
+            server.regime_evidence = []
+        elif "unknown" in regimes or len(regimes) > 1:
+            server.loading_regime = "unknown"
+            server.regime_evidence = evidence
+        else:
+            server.loading_regime = next(iter(regimes))
+            server.regime_evidence = evidence
 
 
 def _optional_string_list(

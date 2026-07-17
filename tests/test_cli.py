@@ -62,7 +62,7 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         payload = json.loads(output)
-        self.assertEqual(payload["schema"], "mcp-top/v2")
+        self.assertEqual(payload["schema"], "mcp-top/v3")
         self.assertEqual(len(payload["clis"]), 1)
         cli_payload = payload["clis"][0]
         self.assertEqual(cli_payload["cli"], "claude-code")
@@ -76,8 +76,12 @@ class CliTests(unittest.TestCase):
         server = next(
             row for row in cli_payload["servers"] if row["server"] == "github"
         )
-        self.assertIsNotNone(server["def_tokens"])
-        self.assertFalse(server["def_tokens"]["exact"])
+        self.assertNotIn("def_tokens", server)
+        self.assertIsNotNone(server["advertised_max_tokens"])
+        self.assertFalse(server["advertised_max_tokens"]["exact"])
+        self.assertIsNotNone(server["upfront_floor_tokens"])
+        self.assertEqual(server["loading_regime"], "unknown")
+        self.assertEqual(server["regime_evidence"], [])
         self.assertEqual(server["calls"], 2)
         self.assertEqual(server["usage_status"], "measured")
         self.assertEqual(server["verdict"], "review")
@@ -89,7 +93,8 @@ class CliTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertTrue(output.startswith("Coverage:"))
         self.assertIn("SERVER", output)
-        self.assertIn("DEF TOKENS", output)
+        self.assertIn("TOKEN RANGE", output)
+        self.assertIn("REGIME", output)
         self.assertLess(output.index("Coverage:"), output.index("SERVER"))
 
     def test_no_query_is_unsupported_but_successful(self) -> None:
@@ -104,7 +109,8 @@ class CliTests(unittest.TestCase):
         )
         self.assertEqual(server["def_status"], "unsupported")
         self.assertEqual(server["def_error"], "skipped by --no-query")
-        self.assertIsNone(server["def_tokens"])
+        self.assertIsNone(server["advertised_max_tokens"])
+        self.assertIsNone(server["upfront_floor_tokens"])
 
     def test_json_emits_nullable_calls_and_usage_status(self) -> None:
         report = Report(
@@ -116,7 +122,10 @@ class CliTests(unittest.TestCase):
                             server="alpha",
                             scope="user",
                             transport="stdio",
-                            def_tokens=None,
+                            advertised_max_tokens=None,
+                            upfront_floor_tokens=None,
+                            loading_regime="unknown",
+                            regime_evidence=[],
                             def_status="unsupported",
                             def_error="not implemented",
                             tool_count=None,
@@ -165,7 +174,10 @@ class CliTests(unittest.TestCase):
                             server="alpha",
                             scope="user",
                             transport="stdio",
-                            def_tokens=None,
+                            advertised_max_tokens=None,
+                            upfront_floor_tokens=None,
+                            loading_regime="unknown",
+                            regime_evidence=[],
                             def_status="unsupported",
                             def_error="not implemented",
                             tool_count=None,
@@ -339,12 +351,11 @@ class CliTests(unittest.TestCase):
 
         _, plain = self._run("--json")
         plain_cli = json.loads(plain)["clis"][0]
-        # Contract: suggested_removals is --prune-only; schema stays v2.
         self.assertNotIn("suggested_removals", plain_cli)
 
         _, pruned = self._run("--json", "--prune")
         payload = json.loads(pruned)
-        self.assertEqual(payload["schema"], "mcp-top/v2")
+        self.assertEqual(payload["schema"], "mcp-top/v3")
         cli_entry = payload["clis"][0]
         self.assertIn("suggested_removals", cli_entry)
         unused = next(
@@ -364,6 +375,7 @@ class CliTests(unittest.TestCase):
                 "scope",
                 "source_path",
                 "gross_tokens",
+                "upfront_floor_tokens",
                 "net_tokens",
                 "reactivates",
                 "reasons",

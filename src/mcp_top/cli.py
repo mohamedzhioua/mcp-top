@@ -227,7 +227,7 @@ def _load_server_tools(
 
 def _report_json(report: Report, include_prune: bool = False) -> dict:
     payload = {
-        "schema": "mcp-top/v2",
+        "schema": "mcp-top/v3",
         "generated_note": report.generated_note,
         "clis": [
             _cli_json(cli_report, include_prune) for cli_report in report.clis
@@ -253,9 +253,6 @@ def _cli_json(cli_report: CliReport, include_prune: bool = False) -> dict:
         "servers": [_row_json(row) for row in cli_report.rows],
     }
     if include_prune:
-        # Additive field: the suggested_removals array appears only with
-        # --prune. Plain --json stays backward-compatible within schema
-        # mcp-top/v2 (it never carries this key).
         entry["suggested_removals"] = [
             _suggestion_json(item) for item in cli_report.suggestions
         ]
@@ -276,6 +273,10 @@ def _suggestion_json(item: PruneSuggestion) -> dict:
         "scope": item.scope,
         "source_path": item.source_path,
         "gross_tokens": {"value": item.gross_tokens, "exact": item.gross_exact},
+        "upfront_floor_tokens": {
+            "value": item.upfront_floor_tokens,
+            "exact": item.upfront_floor_exact,
+        },
         "net_tokens": item.net_tokens,
         "reactivates": reactivates,
         "reasons": item.reasons,
@@ -283,17 +284,14 @@ def _suggestion_json(item: PruneSuggestion) -> dict:
 
 
 def _row_json(row: ServerRow) -> dict:
-    def_tokens = None
-    if row.def_tokens is not None:
-        def_tokens = {
-            "value": row.def_tokens.tokens,
-            "exact": row.def_tokens.exact,
-        }
     return {
         "server": row.server,
         "scope": row.scope,
         "transport": row.transport,
-        "def_tokens": def_tokens,
+        "advertised_max_tokens": _token_json(row.advertised_max_tokens),
+        "upfront_floor_tokens": _token_json(row.upfront_floor_tokens),
+        "loading_regime": row.loading_regime,
+        "regime_evidence": row.regime_evidence,
         "def_status": row.def_status,
         "def_error": row.def_error,
         "tool_count": row.tool_count,
@@ -303,6 +301,12 @@ def _row_json(row: ServerRow) -> dict:
         "verdict": row.verdict,
         "filtered_tools": row.filtered_tools,
     }
+
+
+def _token_json(tokens: TokenCount | None) -> dict | None:
+    if tokens is None:
+        return None
+    return {"value": tokens.tokens, "exact": tokens.exact}
 
 
 def _render_human(report: Report, include_prune: bool = False) -> str:
@@ -326,7 +330,8 @@ def _render_cli_human(cli_report: CliReport, include_header: bool) -> str:
         "SERVER",
         "SCOPE",
         "TOOLS",
-        "DEF TOKENS",
+        "TOKEN RANGE",
+        "REGIME",
         "CALLS(window)",
         "VERDICT",
     )
@@ -334,12 +339,15 @@ def _render_cli_human(cli_report: CliReport, include_header: bool) -> str:
     for row in cli_report.rows:
         verdict = row.verdict
         if row.verdict == "prune":
-            # Provenance-aware: only a clean, global-scope removal earns a
-            # savings figure; everything else is a review candidate and never
-            # asserts a number without its caveats (shown under --prune).
             kind = suggestion_kind.get(row.server)
-            if kind == "suggestion" and row.def_tokens is not None:
-                verdict = f"prune -> save {fmt(row.def_tokens)}/session"
+            if kind == "suggestion" and row.advertised_max_tokens is not None:
+                verdict = (
+                    "prune -> "
+                    + _fmt_removal_range(
+                        row.advertised_max_tokens,
+                        row.upfront_floor_tokens,
+                    )
+                )
             elif kind == "candidate":
                 verdict = "prune candidate"
         if row.filtered_tools:
@@ -352,7 +360,8 @@ def _render_cli_human(cli_report: CliReport, include_header: bool) -> str:
                 row.server,
                 row.scope,
                 "?" if row.tool_count is None else str(row.tool_count),
-                "?" if row.def_tokens is None else fmt(row.def_tokens),
+                _fmt_token_range(row),
+                row.loading_regime,
                 "-" if row.calls is None else str(row.calls),
                 verdict,
             )
@@ -412,11 +421,19 @@ def _render_prune_block(report: Report) -> str:
     ]
     if suggestions:
         for cli_name, item in suggestions:
-            saving = _fmt_tokens(item.net_tokens, item.gross_exact)
+            advertised = TokenCount(item.gross_tokens, item.gross_exact)
+            upfront = (
+                TokenCount(
+                    item.upfront_floor_tokens,
+                    item.upfront_floor_exact,
+                )
+                if item.upfront_floor_tokens is not None
+                else None
+            )
             lines.append(
                 f"  - [{cli_name}] {_ascii(item.server)} ({item.scope}) in "
-                f"{_ascii(item.source_path)} -> est. net saving "
-                f"{saving}/session"
+                f"{_ascii(item.source_path)} -> "
+                f"{_fmt_removal_range(advertised, upfront)}"
             )
         lines.append("  (~ marks a chars/4 estimate, rough error +/-25%)")
     else:
@@ -434,10 +451,16 @@ def _render_prune_block(report: Report) -> str:
     if not candidates and not unavailable:
         lines.append("  none")
     for cli_name, item in candidates:
-        gross = _fmt_tokens(item.gross_tokens, item.gross_exact)
+        advertised = TokenCount(item.gross_tokens, item.gross_exact)
+        upfront = (
+            TokenCount(item.upfront_floor_tokens, item.upfront_floor_exact)
+            if item.upfront_floor_tokens is not None
+            else None
+        )
         lines.append(
             f"  - [{cli_name}] {_ascii(item.server)} ({item.scope}) in "
-            f"{_ascii(item.source_path)} -> removes {gross}/session gross, "
+            f"{_ascii(item.source_path)} -> "
+            f"{_fmt_removal_range(advertised, upfront)}, "
             "net unknown"
         )
         for reason in item.reasons:
@@ -450,10 +473,29 @@ def _render_prune_block(report: Report) -> str:
     return "\n".join(lines)
 
 
-def _fmt_tokens(value: int | None, exact: bool) -> str:
-    if value is None:
-        return "unknown"
-    return fmt(TokenCount(tokens=value, exact=exact))
+def _fmt_token_range(row: ServerRow) -> str:
+    if row.advertised_max_tokens is None:
+        return "?"
+    if (
+        row.upfront_floor_tokens is not None
+        and row.upfront_floor_tokens.tokens == row.advertised_max_tokens.tokens
+        and row.upfront_floor_tokens.exact == row.advertised_max_tokens.exact
+    ):
+        return fmt(row.advertised_max_tokens)
+    floor = (
+        "?"
+        if row.upfront_floor_tokens is None
+        else fmt(row.upfront_floor_tokens)
+    )
+    return f">={floor}..{fmt(row.advertised_max_tokens)}"
+
+
+def _fmt_removal_range(
+    advertised: TokenCount,
+    upfront: TokenCount | None,
+) -> str:
+    floor = "unknown" if upfront is None else fmt(upfront)
+    return f"removes up to {fmt(advertised)} advertised / >={floor} upfront"
 
 
 def _ascii(text: str) -> str:

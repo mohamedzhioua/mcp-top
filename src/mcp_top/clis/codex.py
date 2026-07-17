@@ -37,6 +37,12 @@ def discover_servers(
         warnings,
         "mcp_servers",
     )
+    for server in servers:
+        server.loading_regime = "upfront"
+        server.regime_evidence = [
+            "codex: documented MCP config surface has no tool-definition "
+            "deferral mechanism"
+        ]
     _apply_project_layer_caveats(servers, project_names, project_unreadable)
     return servers, warnings
 

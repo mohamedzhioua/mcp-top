@@ -22,6 +22,7 @@ def serve() -> None:
                         "protocolVersion": "2025-06-18",
                         "capabilities": {"tools": {}},
                         "serverInfo": {"name": "fake", "version": "1.0"},
+                        "instructions": "Fake server instructions.",
                     },
                 }
             )

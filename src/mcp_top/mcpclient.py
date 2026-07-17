@@ -31,6 +31,7 @@ class ServerTools:
     status: str
     error: str | None
     tools: list[dict]
+    instructions: str | None = None
     filtered_tools: int = 0
     unmatched_enabled_tools: list[str] = field(default_factory=list)
 
@@ -114,7 +115,13 @@ def list_server_tools(cfg: ServerConfig, timeout: float = 20.0) -> ServerTools:
                 },
             },
         )
-        _wait_for_response(messages, 1, deadline, timeout)
+        initialize_response = _wait_for_response(messages, 1, deadline, timeout)
+        initialize_result = initialize_response.get("result")
+        instructions = None
+        if isinstance(initialize_result, dict) and isinstance(
+            initialize_result.get("instructions"), str
+        ):
+            instructions = initialize_result["instructions"]
         _send(
             process.stdin,
             {"jsonrpc": "2.0", "method": "notifications/initialized"},
@@ -160,6 +167,7 @@ def list_server_tools(cfg: ServerConfig, timeout: float = 20.0) -> ServerTools:
             status="ok",
             error=None,
             tools=filtered_tools,
+            instructions=instructions,
             filtered_tools=hidden,
             unmatched_enabled_tools=unmatched,
         )

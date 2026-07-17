@@ -8,7 +8,13 @@ from mcp_top.config import ServerConfig
 from mcp_top.counter import UsageWindow
 from mcp_top.coverage import Coverage, build_coverage
 from mcp_top.mcpclient import ServerTools
-from mcp_top.tokens import HEURISTIC, TokenCount, estimate_tool_definition
+from mcp_top.tokens import (
+    HEURISTIC,
+    TokenCount,
+    exact_count,
+    estimate_text,
+    estimate_tool_definition,
+)
 from mcp_top.transcripts import SessionResult
 
 
@@ -20,7 +26,10 @@ class ServerRow:
     server: str
     scope: str
     transport: str
-    def_tokens: TokenCount | None
+    advertised_max_tokens: TokenCount | None
+    upfront_floor_tokens: TokenCount | None
+    loading_regime: str
+    regime_evidence: list[str]
     def_status: str
     def_error: str | None
     tool_count: int | None
@@ -45,7 +54,7 @@ class PruneSuggestion:
     """A safe, serializable prune recommendation for one server.
 
     ``kind`` is ``"suggestion"`` only for a clean, global-scope removal whose
-    estimated net saving equals the winner's measured definition cost.
+    advertised max is a reasonable upper bound for the removed definitions.
     Everything else is a ``"candidate"`` that needs review: ``net_tokens`` is
     ``None`` and ``reasons`` explains why. This object deliberately carries no
     ``env``/``args`` -- it is derived from ``ServerConfig`` but never exposes
@@ -58,6 +67,8 @@ class PruneSuggestion:
     source_path: str
     gross_tokens: int
     gross_exact: bool
+    upfront_floor_tokens: int | None
+    upfront_floor_exact: bool
     net_tokens: int | None
     reactivates: Reactivation | None
     reasons: list[str]
@@ -132,7 +143,10 @@ def build_cli_report(
                 error="definitions not queried",
                 tools=[],
             )
-        def_tokens = _definition_tokens(result)
+        advertised_max = _advertised_max_tokens(result)
+        upfront_floor = _upfront_floor_tokens(
+            result, server, advertised_max
+        )
         called_tools = calls_by_server.get(server.name, {})
         calls = None
         if usage_status == "measured":
@@ -142,7 +156,10 @@ def build_cli_report(
                 server=server.name,
                 scope=server.scope,
                 transport=server.transport,
-                def_tokens=def_tokens,
+                advertised_max_tokens=advertised_max,
+                upfront_floor_tokens=upfront_floor,
+                loading_regime=server.loading_regime,
+                regime_evidence=list(server.regime_evidence),
                 def_status=result.status,
                 def_error=result.error,
                 tool_count=len(result.tools) if result.status == "ok" else None,
@@ -164,7 +181,10 @@ def build_cli_report(
                     server=server_name,
                     scope="(not configured)",
                     transport="unknown",
-                    def_tokens=None,
+                    advertised_max_tokens=None,
+                    upfront_floor_tokens=None,
+                    loading_regime="unknown",
+                    regime_evidence=[],
                     def_status="unsupported",
                     def_error="server is not configured",
                     tool_count=None,
@@ -180,7 +200,11 @@ def build_cli_report(
     rows.sort(
         key=lambda row: (
             severity.get(row.verdict, len(severity)),
-            -(row.def_tokens.tokens if row.def_tokens is not None else 0),
+            -(
+                row.advertised_max_tokens.tokens
+                if row.advertised_max_tokens is not None
+                else 0
+            ),
             row.server,
         )
     )
@@ -211,7 +235,7 @@ def _prune_suggestions(
     whose home-wide zero-call count is a valid denominator, since usage is not
     attributed per project in v0.3 -- with complete provenance and no enabled
     lower-precedence entry that would reactivate on deletion. Everything else is
-    a ``candidate`` whose estimated net saving is unknown.
+    a ``candidate`` whose net effect is unknown.
     """
 
     config_by_name = {server.name: server for server in servers}
@@ -224,10 +248,10 @@ def _prune_suggestions(
     )
     suggestions: list[PruneSuggestion] = []
     for row in rows:
-        if row.verdict != "prune" or row.def_tokens is None:
+        if row.verdict != "prune" or row.advertised_max_tokens is None:
             continue
-        if row.def_tokens.tokens <= 0:
-            # "save ~0" is not useful; skip measured zero-cost rows.
+        if row.advertised_max_tokens.tokens <= 0:
+            # Zero-cost rows are not useful prune suggestions.
             continue
         cfg = config_by_name.get(row.server)
         if cfg is None:
@@ -280,9 +304,23 @@ def _prune_suggestions(
                 server=row.server,
                 scope=cfg.scope,
                 source_path=cfg.source_path,
-                gross_tokens=row.def_tokens.tokens,
-                gross_exact=row.def_tokens.exact,
-                net_tokens=row.def_tokens.tokens if kind == "suggestion" else None,
+                gross_tokens=row.advertised_max_tokens.tokens,
+                gross_exact=row.advertised_max_tokens.exact,
+                upfront_floor_tokens=(
+                    row.upfront_floor_tokens.tokens
+                    if row.upfront_floor_tokens is not None
+                    else None
+                ),
+                upfront_floor_exact=(
+                    row.upfront_floor_tokens.exact
+                    if row.upfront_floor_tokens is not None
+                    else False
+                ),
+                net_tokens=(
+                    row.advertised_max_tokens.tokens
+                    if kind == "suggestion"
+                    else None
+                ),
                 reactivates=reactivation,
                 reasons=reasons,
             )
@@ -316,13 +354,54 @@ def build_report(
     )
 
 
-def _definition_tokens(result: ServerTools) -> TokenCount | None:
+def _advertised_max_tokens(result: ServerTools) -> TokenCount | None:
     if result.status != "ok":
         return None
     estimates = [estimate_tool_definition(tool) for tool in result.tools]
     return TokenCount(
         tokens=sum(estimate.tokens for estimate in estimates),
         exact=bool(estimates) and all(estimate.exact for estimate in estimates),
+    )
+
+
+def _upfront_floor_tokens(
+    result: ServerTools,
+    server: ServerConfig,
+    advertised_max: TokenCount | None,
+) -> TokenCount | None:
+    if result.status != "ok":
+        return None
+    if server.loading_regime == "upfront":
+        return advertised_max
+
+    estimates: list[TokenCount] = []
+    names = [
+        tool["name"]
+        for tool in result.tools
+        if isinstance(tool.get("name"), str)
+    ]
+    if names:
+        estimates.append(estimate_text("\n".join(names)))
+    if result.instructions:
+        estimates.append(estimate_text(result.instructions))
+    estimates.extend(
+        estimate_tool_definition(tool)
+        for tool in result.tools
+        if _is_always_loaded_tool(tool)
+    )
+    if not estimates:
+        return exact_count(0)
+    return TokenCount(
+        tokens=sum(estimate.tokens for estimate in estimates),
+        exact=all(estimate.exact for estimate in estimates),
+    )
+
+
+def _is_always_loaded_tool(tool: dict) -> bool:
+    meta = tool.get("_meta")
+    return (
+        isinstance(meta, dict)
+        and meta.get("anthropic/alwaysLoad") is True
     )
 
 

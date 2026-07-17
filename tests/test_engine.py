@@ -71,7 +71,8 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(rows["beta_review"].verdict, "review")
         self.assertEqual(rows["gamma_keep"].verdict, "keep")
         self.assertEqual(rows["delta_error"].verdict, "review")
-        self.assertIsNone(rows["delta_error"].def_tokens)
+        self.assertIsNone(rows["delta_error"].advertised_max_tokens)
+        self.assertIsNone(rows["delta_error"].upfront_floor_tokens)
         self.assertEqual(rows["delta_error"].calls, 0)
         self.assertEqual(rows["delta_error"].usage_status, "measured")
         self.assertEqual(rows["rogue"].scope, "(not configured)")
@@ -102,6 +103,59 @@ class EngineTests(unittest.TestCase):
             report.coverage.usage_note,
             "no transcript adapter for this CLI",
         )
+
+    def test_deferred_floor_counts_names_instructions_and_always_loaded_defs(
+        self,
+    ) -> None:
+        server = self._server("alpha")
+        server.loading_regime = "deferred"
+        definitions = [
+            ServerTools(
+                server="alpha",
+                status="ok",
+                error=None,
+                instructions="Use alpha for repository search.",
+                tools=[
+                    {
+                        "name": "search",
+                        "description": "Search repositories",
+                        "inputSchema": {"type": "object"},
+                    },
+                    {
+                        "name": "always",
+                        "description": "Always visible",
+                        "inputSchema": {"type": "object"},
+                        "_meta": {"anthropic/alwaysLoad": True},
+                    },
+                ],
+            )
+        ]
+
+        report = build_cli_report("claude-code", [server], definitions, [], None)
+
+        row = report.rows[0]
+        self.assertIsNotNone(row.advertised_max_tokens)
+        self.assertIsNotNone(row.upfront_floor_tokens)
+        self.assertGreater(
+            row.advertised_max_tokens.tokens,
+            row.upfront_floor_tokens.tokens,
+        )
+        self.assertEqual(row.loading_regime, "deferred")
+
+    def test_upfront_regime_collapses_floor_to_advertised_max(self) -> None:
+        server = self._server("alpha")
+        server.loading_regime = "upfront"
+
+        report = build_cli_report(
+            "claude-code",
+            [server],
+            [self._tools("alpha", 2)],
+            [],
+            None,
+        )
+
+        row = report.rows[0]
+        self.assertEqual(row.upfront_floor_tokens, row.advertised_max_tokens)
 
     def test_empty_corpus_usage_is_no_data_not_prune(self) -> None:
         report = self._empty_window_report([])
@@ -319,7 +373,7 @@ class PruneClassificationTests(unittest.TestCase):
 
         report = self._report([cfg], [self._tools("empty", 0)])
 
-        # The row is still a prune verdict, but "save ~0" is not a suggestion.
+        # The row is still a prune verdict, but zero cost is not a suggestion.
         self.assertEqual(report.rows[0].verdict, "prune")
         self.assertEqual(report.suggestions, [])
 

@@ -336,6 +336,168 @@ class DiscoverServersTests(unittest.TestCase):
             )
         )
 
+    def test_always_load_server_is_upfront(self) -> None:
+        with tempfile.TemporaryDirectory() as home:
+            user_path = os.path.join(home, ".claude.json")
+            self._write_json(
+                user_path,
+                {"mcpServers": {"srv": {"command": "run", "alwaysLoad": True}}},
+            )
+
+            servers, warnings = discover_servers(home, None)
+
+        self.assertEqual(warnings, [])
+        self.assertEqual(servers[0].loading_regime, "upfront")
+        self.assertIn("alwaysLoad=true", servers[0].regime_evidence[0])
+
+    def test_settings_enable_tool_search_is_deferred(self) -> None:
+        with tempfile.TemporaryDirectory() as home:
+            self._write_json(
+                os.path.join(home, ".claude.json"),
+                {"mcpServers": {"srv": {"command": "run"}}},
+            )
+            settings_path = os.path.join(home, ".claude", "settings.json")
+            os.makedirs(os.path.dirname(settings_path))
+            self._write_json(
+                settings_path,
+                {"env": {"ENABLE_TOOL_SEARCH": "true"}},
+            )
+
+            servers, warnings = discover_servers(home, None)
+
+        self.assertEqual(warnings, [])
+        self.assertEqual(servers[0].loading_regime, "deferred")
+        self.assertIn(
+            "env.ENABLE_TOOL_SEARCH=true",
+            servers[0].regime_evidence[0],
+        )
+
+    def test_settings_disable_tool_search_is_upfront(self) -> None:
+        with tempfile.TemporaryDirectory() as home:
+            self._write_json(
+                os.path.join(home, ".claude.json"),
+                {"mcpServers": {"srv": {"command": "run"}}},
+            )
+            settings_path = os.path.join(home, ".claude", "settings.json")
+            os.makedirs(os.path.dirname(settings_path))
+            self._write_json(
+                settings_path,
+                {"env": {"ENABLE_TOOL_SEARCH": "false"}},
+            )
+
+            servers, warnings = discover_servers(home, None)
+
+        self.assertEqual(warnings, [])
+        self.assertEqual(servers[0].loading_regime, "upfront")
+        self.assertIn(
+            "env.ENABLE_TOOL_SEARCH=false",
+            servers[0].regime_evidence[0],
+        )
+
+    def test_settings_auto_tool_search_is_unknown(self) -> None:
+        with tempfile.TemporaryDirectory() as home:
+            self._write_json(
+                os.path.join(home, ".claude.json"),
+                {"mcpServers": {"srv": {"command": "run"}}},
+            )
+            settings_path = os.path.join(home, ".claude", "settings.json")
+            os.makedirs(os.path.dirname(settings_path))
+            self._write_json(
+                settings_path,
+                {"env": {"ENABLE_TOOL_SEARCH": "auto:5"}},
+            )
+
+            servers, warnings = discover_servers(home, None)
+
+        self.assertEqual(warnings, [])
+        self.assertEqual(servers[0].loading_regime, "unknown")
+        self.assertIn(
+            "env.ENABLE_TOOL_SEARCH=auto:5",
+            servers[0].regime_evidence[0],
+        )
+
+    def test_settings_tool_search_denial_is_upfront(self) -> None:
+        with tempfile.TemporaryDirectory() as home:
+            self._write_json(
+                os.path.join(home, ".claude.json"),
+                {"mcpServers": {"srv": {"command": "run"}}},
+            )
+            settings_path = os.path.join(home, ".claude", "settings.json")
+            os.makedirs(os.path.dirname(settings_path))
+            self._write_json(
+                settings_path,
+                {"permissions": {"deny": ["ToolSearch"]}},
+            )
+
+            servers, warnings = discover_servers(home, None)
+
+        self.assertEqual(warnings, [])
+        self.assertEqual(servers[0].loading_regime, "upfront")
+        self.assertIn(
+            "permissions.deny=ToolSearch",
+            servers[0].regime_evidence[0],
+        )
+
+    def test_disable_experimental_betas_overrides_enable_tool_search(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as home:
+            self._write_json(
+                os.path.join(home, ".claude.json"),
+                {"mcpServers": {"srv": {"command": "run"}}},
+            )
+            settings_path = os.path.join(home, ".claude", "settings.json")
+            os.makedirs(os.path.dirname(settings_path))
+            self._write_json(
+                settings_path,
+                {
+                    "env": {
+                        "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "true",
+                        "ENABLE_TOOL_SEARCH": "true",
+                    }
+                },
+            )
+
+            servers, warnings = discover_servers(home, None)
+
+        self.assertEqual(warnings, [])
+        self.assertEqual(servers[0].loading_regime, "upfront")
+        self.assertTrue(
+            any(
+                "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=true" in evidence
+                for evidence in servers[0].regime_evidence
+            )
+        )
+
+    def test_conflicting_tool_search_settings_are_unknown(self) -> None:
+        with tempfile.TemporaryDirectory() as home:
+            project_dir = os.path.join(home, "project")
+            os.mkdir(project_dir)
+            self._write_json(
+                os.path.join(home, ".claude.json"),
+                {"mcpServers": {"srv": {"command": "run"}}},
+            )
+            user_settings = os.path.join(home, ".claude", "settings.json")
+            project_settings = os.path.join(
+                project_dir, ".claude", "settings.json"
+            )
+            os.makedirs(os.path.dirname(user_settings))
+            os.makedirs(os.path.dirname(project_settings))
+            self._write_json(
+                user_settings,
+                {"env": {"ENABLE_TOOL_SEARCH": "true"}},
+            )
+            self._write_json(
+                project_settings,
+                {"env": {"ENABLE_TOOL_SEARCH": "false"}},
+            )
+
+            servers, warnings = discover_servers(home, project_dir)
+
+        self.assertEqual(warnings, [])
+        self.assertEqual(servers[0].loading_regime, "unknown")
+        self.assertEqual(len(servers[0].regime_evidence), 2)
+
     def _write_json(self, path: str, data: object) -> None:
         with open(path, "w", encoding="utf-8") as handle:
             json.dump(data, handle)
