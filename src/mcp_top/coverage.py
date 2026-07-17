@@ -60,7 +60,7 @@ def build_coverage(
     in_window: int | None = None
     future_sessions = 0
     if window is None:
-        usage_note = usage_note or "no transcript adapter for this CLI in v0.2"
+        usage_note = usage_note or "no transcript adapter for this CLI"
     else:
         total_tool_calls = sum(window.counts.values())
         mcp_tool_calls = sum(

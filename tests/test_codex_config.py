@@ -109,6 +109,23 @@ class CodexConfigTests(unittest.TestCase):
         self.assertIn("not queried and not merged", note)
         self.assertIn("conditional inventory", note)
 
+    def test_project_equal_to_home_is_not_a_project_layer(self) -> None:
+        with tempfile.TemporaryDirectory() as home:
+            codex_dir = os.path.join(home, ".codex")
+            os.makedirs(codex_dir)
+            shutil.copyfile(
+                os.path.join(FIXTURES, "codex_config.toml"),
+                os.path.join(codex_dir, "config.toml"),
+            )
+
+            # --project pointing at home resolves the "project" config file to
+            # the user config itself; it must not be reported as a layer.
+            _, warnings = discover_servers(home, home)
+
+        self.assertEqual(
+            [w for w in warnings if "project-layer codex config" in w], []
+        )
+
     def test_project_layer_inventory_does_not_require_user_config(self) -> None:
         with tempfile.TemporaryDirectory() as home:
             project = os.path.join(home, "project")

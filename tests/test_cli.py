@@ -137,7 +137,7 @@ class CliTests(unittest.TestCase):
                         servers_queried_ok=0,
                         servers_query_failed=[],
                         config_warnings=[],
-                        usage_note="no transcript adapter for this CLI in v0.2",
+                        usage_note="no transcript adapter for this CLI",
                     ),
                 )
             ],

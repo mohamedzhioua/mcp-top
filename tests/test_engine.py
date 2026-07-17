@@ -100,7 +100,7 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(row.verdict, "unknown")
         self.assertEqual(
             report.coverage.usage_note,
-            "no transcript adapter for this CLI in v0.2",
+            "no transcript adapter for this CLI",
         )
 
     def test_empty_corpus_usage_is_no_data_not_prune(self) -> None:

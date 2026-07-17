@@ -93,7 +93,7 @@ class CursorTests(unittest.TestCase):
         self.assertEqual(
             coverage["usage_note"],
             "Cursor stores chats in undocumented SQLite; no transcript "
-            "adapter in v0.2 -- usage unknown",
+            "adapter -- usage unknown",
         )
         row = payload["clis"][0]["servers"][0]
         self.assertEqual(row["usage_status"], "unsupported")

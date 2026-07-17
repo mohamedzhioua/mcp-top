@@ -34,7 +34,7 @@ class CoverageTests(unittest.TestCase):
             duplicate_tool_use=2,
             unattributed_mcp_calls=3,
             servers_unsupported=4,
-            usage_note="no transcript adapter for this CLI in v0.2",
+            usage_note="no transcript adapter for this CLI",
         )
 
         rendered = render_coverage_text(coverage)
@@ -67,7 +67,7 @@ class CoverageTests(unittest.TestCase):
             rendered,
         )
         self.assertIn(
-            "usage: no transcript adapter for this CLI in v0.2",
+            "usage: no transcript adapter for this CLI",
             rendered,
         )
 

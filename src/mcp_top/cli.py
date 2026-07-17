@@ -65,7 +65,7 @@ CLIS = {
         "session_key": None,
         "usage_note": (
             "Cursor stores chats in undocumented SQLite; no transcript "
-            "adapter in v0.2 -- usage unknown"
+            "adapter -- usage unknown"
         ),
         "detected": lambda home, project: (
             os.path.exists(os.path.join(home, ".cursor", "mcp.json"))
