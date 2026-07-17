@@ -277,7 +277,9 @@ class DiscoverServersTests(unittest.TestCase):
         self.assertEqual(servers[0].shadowed, ())
         self.assertEqual(servers[0].precedence, 0)
 
-    def test_three_layer_shadow_chain_is_ordered_high_to_low(self) -> None:
+    def test_three_layer_shadow_chain_uses_local_project_user_precedence(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as home:
             project_dir = os.path.join(home, "project")
             os.mkdir(project_dir)
@@ -301,14 +303,59 @@ class DiscoverServersTests(unittest.TestCase):
             servers, _ = discover_servers(home, project_dir)
 
         winner = {server.name: server for server in servers}["shared"]
-        self.assertEqual(winner.scope, "project")
+        self.assertEqual(winner.scope, "user-project")
+        self.assertEqual(winner.command, "userproj-cmd")
         self.assertEqual(
             [entry.scope for entry in winner.shadowed],
-            ["user-project", "user"],
+            ["project", "user"],
         )
         # Precedence must be strictly decreasing down the chain.
         ranks = [winner.precedence, *[e.precedence for e in winner.shadowed]]
-        self.assertEqual(ranks, sorted(ranks, reverse=True))
+        self.assertEqual(ranks, [2, 1, 0])
+
+    def test_local_always_load_value_beats_opposing_project_value(self) -> None:
+        with tempfile.TemporaryDirectory() as home:
+            project_dir = os.path.join(home, "project")
+            os.mkdir(project_dir)
+            configured_path = project_dir.replace("\\", "/")
+            self._write_json(
+                os.path.join(home, ".claude.json"),
+                {
+                    "projects": {
+                        configured_path: {
+                            "mcpServers": {
+                                "shared": {
+                                    "command": "local-cmd",
+                                    "alwaysLoad": False,
+                                }
+                            }
+                        }
+                    }
+                },
+            )
+            self._write_json(
+                os.path.join(project_dir, ".mcp.json"),
+                {
+                    "mcpServers": {
+                        "shared": {
+                            "command": "project-cmd",
+                            "alwaysLoad": True,
+                        }
+                    }
+                },
+            )
+
+            servers, warnings = discover_servers(home, project_dir)
+
+        self.assertEqual(warnings, [])
+        winner = servers[0]
+        self.assertEqual(winner.scope, "user-project")
+        self.assertEqual(winner.precedence, 2)
+        self.assertFalse(winner.always_load)
+        self.assertEqual(winner.loading_regime, "unknown")
+        self.assertEqual(winner.shadowed[0].scope, "project")
+        self.assertEqual(winner.shadowed[0].precedence, 1)
+        self.assertTrue(winner.shadowed[0].always_load)
 
     def test_malformed_enabled_tools_applies_no_filter(self) -> None:
         with tempfile.TemporaryDirectory() as home:
@@ -412,7 +459,7 @@ class DiscoverServersTests(unittest.TestCase):
         self.assertEqual(warnings, [])
         self.assertEqual(servers[0].loading_regime, "unknown")
         self.assertIn(
-            "env.ENABLE_TOOL_SEARCH=auto:5",
+            "env.ENABLE_TOOL_SEARCH=auto:N",
             servers[0].regime_evidence[0],
         )
 
@@ -438,6 +485,28 @@ class DiscoverServersTests(unittest.TestCase):
             servers[0].regime_evidence[0],
         )
 
+    def test_scoped_tool_search_denial_is_unknown(self) -> None:
+        with tempfile.TemporaryDirectory() as home:
+            self._write_json(
+                os.path.join(home, ".claude.json"),
+                {"mcpServers": {"srv": {"command": "run"}}},
+            )
+            settings_path = os.path.join(home, ".claude", "settings.json")
+            os.makedirs(os.path.dirname(settings_path))
+            self._write_json(
+                settings_path,
+                {"permissions": {"deny": ["ToolSearch(mcp__srv__*)"]}},
+            )
+
+            servers, warnings = discover_servers(home, None)
+
+        self.assertEqual(warnings, [])
+        self.assertEqual(servers[0].loading_regime, "unknown")
+        self.assertEqual(
+            servers[0].regime_evidence,
+            [f"{settings_path}:permissions.deny=ToolSearch(...)"],
+        )
+
     def test_disable_experimental_betas_overrides_enable_tool_search(
         self,
     ) -> None:
@@ -452,7 +521,7 @@ class DiscoverServersTests(unittest.TestCase):
                 settings_path,
                 {
                     "env": {
-                        "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "true",
+                        "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "1",
                         "ENABLE_TOOL_SEARCH": "true",
                     }
                 },
@@ -464,10 +533,65 @@ class DiscoverServersTests(unittest.TestCase):
         self.assertEqual(servers[0].loading_regime, "upfront")
         self.assertTrue(
             any(
-                "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=true" in evidence
+                "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=set" in evidence
                 for evidence in servers[0].regime_evidence
             )
         )
+        self.assertFalse(
+            any(
+                "EXPERIMENTAL_BETAS=1" in evidence
+                for evidence in servers[0].regime_evidence
+            )
+        )
+
+    def test_invalid_beta_override_is_unknown(self) -> None:
+        with tempfile.TemporaryDirectory() as home:
+            self._write_json(
+                os.path.join(home, ".claude.json"),
+                {"mcpServers": {"srv": {"command": "run"}}},
+            )
+            settings_path = os.path.join(home, ".claude", "settings.json")
+            os.makedirs(os.path.dirname(settings_path))
+            self._write_json(
+                settings_path,
+                {"env": {"CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "true"}},
+            )
+
+            servers, warnings = discover_servers(home, None)
+
+        self.assertEqual(warnings, [])
+        self.assertEqual(servers[0].loading_regime, "unknown")
+        self.assertEqual(
+            servers[0].regime_evidence,
+            [
+                f"{settings_path}:env."
+                "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=unrecognized"
+            ],
+        )
+
+    def test_invalid_tool_search_env_is_unknown_without_leaking_value(self) -> None:
+        sentinel = "sk_live_DO_NOT_LEAK"
+        with tempfile.TemporaryDirectory() as home:
+            self._write_json(
+                os.path.join(home, ".claude.json"),
+                {"mcpServers": {"srv": {"command": "run"}}},
+            )
+            settings_path = os.path.join(home, ".claude", "settings.json")
+            os.makedirs(os.path.dirname(settings_path))
+            self._write_json(
+                settings_path,
+                {"env": {"ENABLE_TOOL_SEARCH": sentinel}},
+            )
+
+            servers, warnings = discover_servers(home, None)
+
+        self.assertEqual(warnings, [])
+        self.assertEqual(servers[0].loading_regime, "unknown")
+        self.assertEqual(
+            servers[0].regime_evidence,
+            [f"{settings_path}:env.ENABLE_TOOL_SEARCH=unrecognized"],
+        )
+        self.assertNotIn(sentinel, json.dumps(servers[0].regime_evidence))
 
     def test_conflicting_tool_search_settings_are_unknown(self) -> None:
         with tempfile.TemporaryDirectory() as home:

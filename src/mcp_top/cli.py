@@ -316,12 +316,12 @@ def _suggestion_json(cli_name: str, item: PruneSuggestion) -> dict:
         "server": item.server,
         "scope": item.scope,
         "source_path": item.source_path,
-        "gross_tokens": {"value": item.gross_tokens, "exact": item.gross_exact},
-        "upfront_floor_tokens": {
-            "value": item.upfront_floor_tokens,
-            "exact": item.upfront_floor_exact,
-        },
-        "net_tokens": item.net_tokens,
+        "removes_advertised_max_tokens": _token_json(
+            item.removes_advertised_max_tokens
+        ),
+        "removes_upfront_floor_tokens": _token_json(
+            item.removes_upfront_floor_tokens
+        ),
         "reactivates": reactivates,
         "reasons": item.reasons,
         "recipe": _recipe_json(_remediation_recipe(cli_name, item)),
@@ -449,9 +449,10 @@ def _render_cli_human(cli_report: CliReport, include_header: bool) -> str:
 def _render_prune_block(report: Report) -> str:
     """Render the two-tier --prune section: clean suggestions, then candidates.
 
-    Never applied. Suggestions carry an estimated net saving; candidates carry
-    only a gross figure plus the specific reasons they need review. CLIs with
-    no usage adapter are reported explicitly rather than shown as an empty set.
+    Never applied. Suggestions and candidates carry an advertised-maximum and
+    upfront-floor removal range; candidates also explain why their actual
+    saving is unknown. CLIs with no usage adapter are reported explicitly
+    rather than shown as an empty set.
     """
 
     lines = [
@@ -466,19 +467,14 @@ def _render_prune_block(report: Report) -> str:
     ]
     if suggestions:
         for cli_name, item in suggestions:
-            advertised = TokenCount(item.gross_tokens, item.gross_exact)
-            upfront = (
-                TokenCount(
-                    item.upfront_floor_tokens,
-                    item.upfront_floor_exact,
-                )
-                if item.upfront_floor_tokens is not None
-                else None
+            removal_range = _fmt_removal_range(
+                item.removes_advertised_max_tokens,
+                item.removes_upfront_floor_tokens,
             )
             lines.append(
                 f"  - [{cli_name}] {_ascii(item.server)} ({item.scope}) in "
                 f"{_ascii(item.source_path)} -> "
-                f"{_fmt_removal_range(advertised, upfront)}"
+                f"{removal_range}"
             )
             recipe = _remediation_recipe(cli_name, item)
             if recipe["kind"] == "command":
@@ -494,7 +490,9 @@ def _render_prune_block(report: Report) -> str:
         lines.append("  none")
 
     lines.append("")
-    lines.append("Prune candidates -- review before removing (net saving unknown):")
+    lines.append(
+        "Prune candidates -- review before removing (actual saving unknown):"
+    )
     candidates = [
         (cli.cli, item)
         for cli in report.clis
@@ -505,17 +503,15 @@ def _render_prune_block(report: Report) -> str:
     if not candidates and not unavailable:
         lines.append("  none")
     for cli_name, item in candidates:
-        advertised = TokenCount(item.gross_tokens, item.gross_exact)
-        upfront = (
-            TokenCount(item.upfront_floor_tokens, item.upfront_floor_exact)
-            if item.upfront_floor_tokens is not None
-            else None
+        removal_range = _fmt_removal_range(
+            item.removes_advertised_max_tokens,
+            item.removes_upfront_floor_tokens,
         )
         lines.append(
             f"  - [{cli_name}] {_ascii(item.server)} ({item.scope}) in "
             f"{_ascii(item.source_path)} -> "
-            f"{_fmt_removal_range(advertised, upfront)}, "
-            "net unknown"
+            f"{removal_range}, "
+            "actual saving unknown"
         )
         for reason in item.reasons:
             lines.append(f"      * {_ascii(reason)}")
@@ -670,7 +666,10 @@ def _fmt_removal_range(
     upfront: TokenCount | None,
 ) -> str:
     floor = "unknown" if upfront is None else fmt(upfront)
-    return f"removes up to {fmt(advertised)} advertised / >={floor} upfront"
+    return (
+        f"removes advertised up to {fmt(advertised)} / "
+        f"upfront at least {floor}"
+    )
 
 
 def _ascii(text: str) -> str:

@@ -20,6 +20,11 @@ from mcp_top.transcripts import SessionResult
 
 REVIEW_THRESHOLD = 3
 
+# Claude documents: "Claude Code truncates tool descriptions and server
+# instructions at 2KB each." Interpret 2KB as 2 * 1024 UTF-8 bytes.
+# https://code.claude.com/docs/en/mcp#scale-with-mcp-tool-search
+_CLAUDE_TEXT_LIMIT_BYTES = 2 * 1024
+
 
 @dataclass
 class ServerRow:
@@ -53,23 +58,19 @@ class Reactivation:
 class PruneSuggestion:
     """A safe, serializable prune recommendation for one server.
 
-    ``kind`` is ``"suggestion"`` only for a clean, global-scope removal whose
-    advertised max is a reasonable upper bound for the removed definitions.
-    Everything else is a ``"candidate"`` that needs review: ``net_tokens`` is
-    ``None`` and ``reasons`` explains why. This object deliberately carries no
-    ``env``/``args`` -- it is derived from ``ServerConfig`` but never exposes
-    its secrets.
+    ``kind`` is ``"suggestion"`` only for a clean, global-scope removal. Both
+    kinds carry the advertised maximum and upfront floor removed with the
+    winning config entry; a ``"candidate"`` needs review because its net effect
+    is unknown. This object deliberately carries no ``env``/``args`` -- it is
+    derived from ``ServerConfig`` but never exposes its secrets.
     """
 
     kind: str
     server: str
     scope: str
     source_path: str
-    gross_tokens: int
-    gross_exact: bool
-    upfront_floor_tokens: int | None
-    upfront_floor_exact: bool
-    net_tokens: int | None
+    removes_advertised_max_tokens: TokenCount
+    removes_upfront_floor_tokens: TokenCount | None
     reactivates: Reactivation | None
     reasons: list[str]
 
@@ -143,9 +144,8 @@ def build_cli_report(
                 error="definitions not queried",
                 tools=[],
             )
-        advertised_max = _advertised_max_tokens(result)
-        upfront_floor = _upfront_floor_tokens(
-            result, server, advertised_max
+        advertised_max, upfront_floor = _context_token_range(
+            result, server, cli_name
         )
         called_tools = calls_by_server.get(server.name, {})
         calls = None
@@ -304,23 +304,8 @@ def _prune_suggestions(
                 server=row.server,
                 scope=cfg.scope,
                 source_path=cfg.source_path,
-                gross_tokens=row.advertised_max_tokens.tokens,
-                gross_exact=row.advertised_max_tokens.exact,
-                upfront_floor_tokens=(
-                    row.upfront_floor_tokens.tokens
-                    if row.upfront_floor_tokens is not None
-                    else None
-                ),
-                upfront_floor_exact=(
-                    row.upfront_floor_tokens.exact
-                    if row.upfront_floor_tokens is not None
-                    else False
-                ),
-                net_tokens=(
-                    row.advertised_max_tokens.tokens
-                    if kind == "suggestion"
-                    else None
-                ),
+                removes_advertised_max_tokens=row.advertised_max_tokens,
+                removes_upfront_floor_tokens=row.upfront_floor_tokens,
                 reactivates=reactivation,
                 reasons=reasons,
             )
@@ -354,47 +339,84 @@ def build_report(
     )
 
 
-def _advertised_max_tokens(result: ServerTools) -> TokenCount | None:
-    if result.status != "ok":
-        return None
-    estimates = [estimate_tool_definition(tool) for tool in result.tools]
-    return TokenCount(
-        tokens=sum(estimate.tokens for estimate in estimates),
-        exact=bool(estimates) and all(estimate.exact for estimate in estimates),
-    )
-
-
-def _upfront_floor_tokens(
+def _context_token_range(
     result: ServerTools,
     server: ServerConfig,
-    advertised_max: TokenCount | None,
-) -> TokenCount | None:
-    if result.status != "ok":
-        return None
-    if server.loading_regime == "upfront":
-        return advertised_max
+    cli_name: str,
+) -> tuple[TokenCount | None, TokenCount | None]:
+    """Return one disjoint advertised-maximum/upfront-floor token range."""
 
-    estimates: list[TokenCount] = []
+    if result.status != "ok":
+        return None, None
+
+    text_limit = _CLAUDE_TEXT_LIMIT_BYTES if cli_name == "claude-code" else None
+    upfront_components: list[TokenCount] = []
+    deferred_components: list[TokenCount] = []
     names = [
         tool["name"]
         for tool in result.tools
         if isinstance(tool.get("name"), str)
     ]
     if names:
-        estimates.append(estimate_text("\n".join(names)))
+        upfront_components.append(estimate_text("\n".join(names)))
     if result.instructions:
-        estimates.append(estimate_text(result.instructions))
-    estimates.extend(
-        estimate_tool_definition(tool)
-        for tool in result.tools
-        if _is_always_loaded_tool(tool)
+        upfront_components.append(
+            estimate_text(_truncate_text(result.instructions, text_limit))
+        )
+
+    for tool in result.tools:
+        definition = _definition_without_name(tool, text_limit)
+        estimate = estimate_tool_definition(definition)
+        if server.loading_regime == "upfront" or _is_always_loaded_tool(tool):
+            upfront_components.append(estimate)
+        else:
+            deferred_components.append(estimate)
+
+    upfront_floor = _sum_token_counts(upfront_components)
+    advertised_max = _sum_token_counts(
+        [*upfront_components, *deferred_components]
     )
+    _enforce_token_range(advertised_max, upfront_floor)
+    return advertised_max, upfront_floor
+
+
+def _definition_without_name(tool: dict, text_limit: int | None) -> dict:
+    """Return the definition-only component, excluding its advertised name."""
+
+    definition = dict(tool)
+    if isinstance(tool.get("name"), str):
+        definition.pop("name")
+    description = definition.get("description")
+    if isinstance(description, str):
+        definition["description"] = _truncate_text(description, text_limit)
+    return definition
+
+
+def _truncate_text(text: str, byte_limit: int | None) -> str:
+    if byte_limit is None:
+        return text
+    encoded = text.encode("utf-8")
+    if len(encoded) <= byte_limit:
+        return text
+    return encoded[:byte_limit].decode("utf-8", errors="ignore")
+
+
+def _sum_token_counts(estimates: list[TokenCount]) -> TokenCount:
     if not estimates:
         return exact_count(0)
     return TokenCount(
         tokens=sum(estimate.tokens for estimate in estimates),
         exact=all(estimate.exact for estimate in estimates),
     )
+
+
+def _enforce_token_range(
+    advertised_max: TokenCount, upfront_floor: TokenCount
+) -> None:
+    if upfront_floor.tokens > advertised_max.tokens:
+        raise AssertionError(
+            "invalid token range: upfront floor exceeds advertised maximum"
+        )
 
 
 def _is_always_loaded_tool(tool: dict) -> bool:

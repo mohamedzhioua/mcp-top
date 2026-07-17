@@ -18,10 +18,11 @@ _MISSING = object()
 
 # Relative precedence of the config scopes, low to high. Only the ordering
 # matters: a higher number wins and shadows lower-numbered same-name entries.
-# Claude Code layers user -> user-project -> project; Cursor user -> project;
-# Codex reads user scope only (its project layer is a conditional inventory and
-# is never merged into this map -- see clis/codex.py).
-_SCOPE_PRECEDENCE = {"user": 0, "user-project": 1, "project": 2}
+# Claude Code precedence is user < project < local (stored as
+# ``user-project`` in ~/.claude.json); Cursor is user < project. Codex reads
+# user scope only (its project layer is a conditional inventory and is never
+# merged into this map -- see clis/codex.py).
+_SCOPE_PRECEDENCE = {"user": 0, "project": 1, "user-project": 2}
 
 
 @dataclass
@@ -61,9 +62,9 @@ def discover_servers(
 ) -> tuple[list[ServerConfig], list[str]]:
     """Return configured MCP servers and non-fatal warnings.
 
-    Discovery reads Claude Code user, user-project, and project scopes in
-    increasing precedence. Later scopes override earlier servers with the same
-    name; only winning entries are returned.
+    Discovery reads Claude Code user, user-project, and project scopes, then
+    merges them using explicit scope precedence. Only winning entries are
+    returned.
     """
 
     warnings: list[str] = []
@@ -326,58 +327,92 @@ def _claude_tool_search_signals(
             continue
         env = settings.get("env")
         if isinstance(env, dict):
-            beta_value = env.get("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS")
-            if _truthy_env(beta_value):
+            beta_category = _disable_betas_category(
+                env.get("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS", _MISSING)
+            )
+            if beta_category is not None:
                 signals.append(
                     _RegimeSignal(
-                        "upfront",
+                        "upfront" if beta_category == "set" else "unknown",
                         (
                             f"{path}:env."
                             "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS="
-                            f"{beta_value}"
+                            f"{beta_category}"
                         ),
-                        override=True,
+                        override=beta_category == "set",
                     )
                 )
-            value = env.get("ENABLE_TOOL_SEARCH")
-            if isinstance(value, str):
-                normalized = value.strip().casefold()
-                evidence = f"{path}:env.ENABLE_TOOL_SEARCH={value}"
-                if normalized == "false":
+            tool_search_category = _tool_search_category(
+                env.get("ENABLE_TOOL_SEARCH", _MISSING)
+            )
+            if tool_search_category is not None:
+                evidence = (
+                    f"{path}:env.ENABLE_TOOL_SEARCH={tool_search_category}"
+                )
+                if tool_search_category == "false":
                     signals.append(_RegimeSignal("upfront", evidence))
-                elif normalized == "true":
+                elif tool_search_category == "true":
                     signals.append(_RegimeSignal("deferred", evidence))
-                elif normalized == "auto" or normalized.startswith("auto:"):
-                    signals.append(_RegimeSignal("unknown", evidence))
                 else:
                     signals.append(_RegimeSignal("unknown", evidence))
         permissions = settings.get("permissions")
         if isinstance(permissions, dict):
             denied = permissions.get("deny")
             if isinstance(denied, list):
-                for item in denied:
-                    if isinstance(item, str) and _denies_tool_search(item):
-                        signals.append(
-                            _RegimeSignal(
-                                "upfront",
-                                f"{path}:permissions.deny=ToolSearch",
-                            )
+                rules = [item for item in denied if isinstance(item, str)]
+                if any(_denies_tool_search(item) for item in rules):
+                    signals.append(
+                        _RegimeSignal(
+                            "upfront",
+                            f"{path}:permissions.deny=ToolSearch",
                         )
-                        break
+                    )
+                elif any(_scopes_tool_search_denial(item) for item in rules):
+                    signals.append(
+                        _RegimeSignal(
+                            "unknown",
+                            f"{path}:permissions.deny=ToolSearch(...)"
+                        )
+                    )
     return signals
 
 
-def _truthy_env(value: Any) -> bool:
-    if isinstance(value, bool):
-        return value
+def _disable_betas_category(value: Any) -> str | None:
+    """Return a secret-safe category for the documented beta override."""
+
+    if value is _MISSING or value is None or value == "":
+        return None
+    return "set" if value == "1" else "unrecognized"
+
+
+def _tool_search_category(value: Any) -> str | None:
+    """Return a documented, secret-safe ENABLE_TOOL_SEARCH category."""
+
+    if value is _MISSING or value is None or value == "":
+        return None
     if not isinstance(value, str):
-        return False
-    return value.strip().casefold() in {"1", "true", "yes", "on"}
+        return "unrecognized"
+    normalized = value.strip().casefold()
+    if normalized in {"true", "false", "auto"}:
+        return normalized
+    prefix, separator, threshold = normalized.partition(":")
+    if (
+        prefix == "auto"
+        and separator
+        and threshold.isdigit()
+        and 0 <= int(threshold) <= 100
+    ):
+        return "auto:N"
+    return "unrecognized"
 
 
 def _denies_tool_search(value: str) -> bool:
+    return value.strip() == "ToolSearch"
+
+
+def _scopes_tool_search_denial(value: str) -> bool:
     stripped = value.strip()
-    return stripped == "ToolSearch" or stripped.startswith("ToolSearch(")
+    return stripped.startswith("ToolSearch(") and stripped.endswith(")")
 
 
 def _apply_claude_loading_regimes(
