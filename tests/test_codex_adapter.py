@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import unittest
@@ -59,6 +60,75 @@ class CodexAdapterTests(unittest.TestCase):
         self.assertEqual(result.skip_reason, "no session metadata found")
         self.assertEqual(result.versions_seen, [])
 
+    def test_session_meta_with_null_cli_version_is_admitted(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = self._write_records(
+                temporary,
+                [
+                    {
+                        "type": "session_meta",
+                        "timestamp": "2026-06-10T10:00:00Z",
+                        "payload": {"id": "session", "cli_version": None},
+                    },
+                    {
+                        "type": "response_item",
+                        "timestamp": "2026-06-10T10:01:00Z",
+                        "payload": {
+                            "type": "function_call",
+                            "call_id": "call-1",
+                            "namespace": "mcp__github",
+                            "name": "get_issue",
+                        },
+                    },
+                ],
+            )
+
+            result = parse_session(path)
+
+        self.assertEqual(result.status, "parsed")
+        self.assertEqual(result.versions_seen, ["(unversioned)"])
+        self.assertEqual(result.tool_calls[0].kind, "mcp")
+        self.assertEqual(result.tool_calls[0].server, "github")
+        self.assertEqual(result.tool_calls[0].tool, "get_issue")
+
+    def test_invalid_name_does_not_consume_call_id(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = self._write_records(
+                temporary,
+                [
+                    {
+                        "type": "session_meta",
+                        "timestamp": "2026-06-10T10:00:00Z",
+                        "payload": {"id": "session", "cli_version": "0.144.1"},
+                    },
+                    {
+                        "type": "response_item",
+                        "timestamp": "2026-06-10T10:01:00Z",
+                        "payload": {
+                            "type": "function_call",
+                            "call_id": "same",
+                            "namespace": "mcp__github",
+                            "name": None,
+                        },
+                    },
+                    {
+                        "type": "response_item",
+                        "timestamp": "2026-06-10T10:02:00Z",
+                        "payload": {
+                            "type": "function_call",
+                            "call_id": "same",
+                            "namespace": "mcp__github",
+                            "name": "get_issue",
+                        },
+                    },
+                ],
+            )
+
+            result = parse_session(path)
+
+        self.assertEqual([call.raw for call in result.tool_calls], ["get_issue"])
+        self.assertEqual(result.duplicate_tool_use, 0)
+
     def test_mostly_unparseable_file_is_skipped(self) -> None:
         result = parse_session(
             os.path.join(
@@ -91,6 +161,13 @@ class CodexAdapterTests(unittest.TestCase):
 
         self.assertEqual(found, sorted(paths))
         self.assertEqual(session_key(paths[0], home), "rollout-b")
+
+    def _write_records(self, directory: str, records: list[dict]) -> str:
+        path = os.path.join(directory, "rollout-test.jsonl")
+        with open(path, "w", encoding="utf-8") as handle:
+            for record in records:
+                handle.write(json.dumps(record) + "\n")
+        return path
 
 
 if __name__ == "__main__":

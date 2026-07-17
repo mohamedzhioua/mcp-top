@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import unittest
 
 import _path  # noqa: F401
 
 from mcp_top.config import ServerConfig
-from mcp_top.counter import UsageWindow
+from mcp_top.counter import UsageWindow, count_calls
 from mcp_top.engine import build_cli_report
 from mcp_top.mcpclient import ServerTools
+from mcp_top.transcripts import SessionResult, ToolCall
 
 
 class EngineTests(unittest.TestCase):
@@ -101,6 +103,77 @@ class EngineTests(unittest.TestCase):
             "no transcript adapter for this CLI in v0.2",
         )
 
+    def test_empty_corpus_usage_is_no_data_not_prune(self) -> None:
+        report = self._empty_window_report([])
+
+        self._assert_no_data_unknown(report)
+        self.assertEqual(
+            report.coverage.usage_note,
+            "no transcripts found -- usage unknown",
+        )
+
+    def test_all_skipped_usage_is_no_data_not_prune(self) -> None:
+        sessions = [
+            SessionResult(
+                path="skipped",
+                session_id=None,
+                status="skipped",
+                skip_reason="unknown format version",
+                versions_seen=[],
+                tool_calls=[],
+                first_ts=None,
+                last_ts=None,
+            )
+        ]
+
+        report = self._empty_window_report(sessions)
+
+        self._assert_no_data_unknown(report)
+        self.assertEqual(
+            report.coverage.usage_note,
+            "no usable sessions in the window -- usage unknown",
+        )
+
+    def test_no_timestamp_usage_is_no_data_not_prune(self) -> None:
+        sessions = [
+            SessionResult(
+                path="no-time",
+                session_id="no-time",
+                status="parsed",
+                skip_reason=None,
+                versions_seen=["2.1.211"],
+                tool_calls=[self._call("mcp__alpha__lookup")],
+                first_ts=None,
+                last_ts=None,
+            )
+        ]
+
+        report = self._empty_window_report(sessions)
+
+        self._assert_no_data_unknown(report)
+        self.assertEqual(report.coverage.parsed_without_timestamp, 1)
+
+    def test_future_only_usage_is_no_data_not_prune(self) -> None:
+        sessions = [
+            SessionResult(
+                path="future",
+                session_id="future",
+                status="parsed",
+                skip_reason=None,
+                versions_seen=["2.1.211"],
+                tool_calls=[
+                    self._call("mcp__alpha__lookup", "2026-06-16T12:00:00Z")
+                ],
+                first_ts="2026-06-16T12:00:00Z",
+                last_ts="2026-06-16T12:00:00Z",
+            )
+        ]
+
+        report = self._empty_window_report(sessions)
+
+        self._assert_no_data_unknown(report)
+        self.assertEqual(report.coverage.future_sessions, 1)
+
     def _server(self, name: str) -> ServerConfig:
         return ServerConfig(
             name=name,
@@ -126,6 +199,37 @@ class EngineTests(unittest.TestCase):
                 }
                 for index in range(count)
             ],
+        )
+
+    def _empty_window_report(self, sessions: list[SessionResult]):
+        window = count_calls(
+            sessions,
+            [session.path for session in sessions],
+            now=datetime(2026, 6, 15, 12, 0, tzinfo=timezone.utc),
+        )
+        return build_cli_report(
+            "claude-code",
+            [self._server("alpha")],
+            [self._tools("alpha", 1)],
+            sessions,
+            window,
+        )
+
+    def _assert_no_data_unknown(self, report) -> None:
+        row = report.rows[0]
+        self.assertIsNone(row.calls)
+        self.assertEqual(row.usage_status, "no-data")
+        self.assertEqual(row.verdict, "unknown")
+
+    def _call(
+        self, raw: str, timestamp: str = "2026-06-15T12:00:00Z"
+    ) -> ToolCall:
+        return ToolCall(
+            raw=raw,
+            kind="mcp",
+            server="alpha",
+            tool="lookup",
+            timestamp=timestamp,
         )
 
 

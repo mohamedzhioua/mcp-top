@@ -7,6 +7,13 @@ import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
 
+from mcp_top._version_gate import MESSAGE, check_python_version
+
+
+if not check_python_version():
+    print(MESSAGE, file=sys.stderr)
+    raise SystemExit(2)
+
 from mcp_top.cli import main
 
 

@@ -35,6 +35,10 @@ CLIS = {
         "detected": lambda home, project: (
             os.path.exists(os.path.join(home, ".claude.json"))
             or os.path.exists(os.path.join(home, ".claude", "projects"))
+            or (
+                project is not None
+                and os.path.exists(os.path.join(project, ".mcp.json"))
+            )
         ),
     },
     "codex": {
@@ -45,6 +49,12 @@ CLIS = {
         "detected": lambda home, project: (
             os.path.exists(os.path.join(home, ".codex", "config.toml"))
             or os.path.exists(os.path.join(home, ".codex", "sessions"))
+            or (
+                project is not None
+                and os.path.exists(
+                    os.path.join(project, ".codex", "config.toml")
+                )
+            )
         ),
     },
     "cursor": {
@@ -127,6 +137,9 @@ def _build(args: argparse.Namespace) -> Report:
         ]
     else:
         cli_names = [args.cli]
+    note = None
+    if args.cli == "all" and not cli_names:
+        note = f"no supported CLIs detected under {args.home}"
     inputs: list[CliReportInput] = []
     for cli_name in cli_names:
         entry = CLIS[cli_name]
@@ -168,7 +181,7 @@ def _build(args: argparse.Namespace) -> Report:
                 usage_note=entry.get("usage_note"),
             )
         )
-    return build_report(inputs)
+    return build_report(inputs, note=note)
 
 
 def _load_server_tools(
@@ -199,11 +212,14 @@ def _load_server_tools(
 
 
 def _report_json(report: Report) -> dict:
-    return {
+    payload = {
         "schema": "mcp-top/v2",
         "generated_note": report.generated_note,
         "clis": [_cli_json(cli_report) for cli_report in report.clis],
     }
+    if report.note is not None:
+        payload["note"] = report.note
+    return payload
 
 
 def _cli_json(cli_report: CliReport) -> dict:
@@ -241,14 +257,18 @@ def _row_json(row: ServerRow) -> dict:
         "usage_status": row.usage_status,
         "called_tools": row.called_tools,
         "verdict": row.verdict,
+        "filtered_tools": row.filtered_tools,
     }
 
 
 def _render_human(report: Report) -> str:
-    sections = [
+    sections = []
+    if report.note is not None:
+        sections.append(report.note)
+    sections.extend([
         _render_cli_human(cli_report, include_header=len(report.clis) > 1)
         for cli_report in report.clis
-    ]
+    ])
     sections.append(report.generated_note)
     return "\n\n".join(sections)
 

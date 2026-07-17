@@ -43,6 +43,7 @@ class CliReport:
 class Report:
     clis: list[CliReport]
     generated_note: str
+    note: str | None = None
 
 
 @dataclass
@@ -81,7 +82,12 @@ def build_cli_report(
     tools_by_server = {result.server: result for result in server_tools_list}
     configured_names = {server.name for server in servers}
     calls_by_server = {} if window is None else window.server_tool_counts
-    usage_status = "unsupported" if window is None else "measured"
+    if window is None:
+        usage_status = "unsupported"
+    elif window.sessions_considered == 0:
+        usage_status = "no-data"
+    else:
+        usage_status = "measured"
 
     rows: list[ServerRow] = []
     for server in servers:
@@ -159,7 +165,9 @@ def build_cli_report(
     )
 
 
-def build_report(cli_inputs: list[CliReportInput]) -> Report:
+def build_report(
+    cli_inputs: list[CliReportInput], note: str | None = None
+) -> Report:
     """Build a report from already separated per-CLI inputs."""
 
     return Report(
@@ -179,6 +187,7 @@ def build_report(cli_inputs: list[CliReportInput]) -> Report:
             f"Definition token counts use the {HEURISTIC} heuristic; "
             "~ means estimate."
         ),
+        note=note,
     )
 
 
@@ -193,7 +202,7 @@ def _definition_tokens(result: ServerTools) -> TokenCount | None:
 
 
 def _verdict(calls: int | None, def_status: str, usage_status: str) -> str:
-    if usage_status == "unsupported":
+    if usage_status in {"unsupported", "no-data"}:
         return "unknown"
     if calls is None:
         return "unknown"

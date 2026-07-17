@@ -9,8 +9,8 @@ The format is based on Keep a Changelog.
 ### Changed
 
 - Raised the Python floor to 3.11+.
-- Refactored reports around a per-CLI architecture while keeping Claude Code as the only wired CLI in this batch.
-- Made usage nullable with an explicit `usage_status`.
+- Refactored reports around a per-CLI architecture for Claude Code, Codex, and Cursor inventory.
+- Made usage nullable with explicit `usage_status` values, including `no-data` when no usable sessions are available.
 - Changed JSON output to breaking schema `mcp-top/v2` with nested per-CLI results.
 - Added the `unknown` verdict for unsupported usage.
 

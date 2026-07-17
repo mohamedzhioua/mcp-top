@@ -99,6 +99,50 @@ class CoverageTests(unittest.TestCase):
             rendered,
         )
 
+    def test_unknown_adapter_usage_renders_without_zero_counts(self) -> None:
+        coverage = Coverage(
+            transcripts_found=0,
+            transcripts_parsed=0,
+            transcripts_skipped=[],
+            in_window=None,
+            total_tool_calls=None,
+            mcp_tool_calls=None,
+            servers_queried_ok=0,
+            servers_query_failed=[],
+            config_warnings=[],
+        )
+
+        rendered = render_coverage_text(coverage)
+
+        self.assertIn("usage: unknown (no transcript adapter)", rendered)
+        self.assertNotIn("0 in window; 0 tool calls (0 MCP)", rendered)
+
+    def test_shorten_codex_session_paths(self) -> None:
+        coverage = Coverage(
+            transcripts_found=1,
+            transcripts_parsed=0,
+            transcripts_skipped=[
+                (
+                    "/home/test/.codex/sessions/2026/06/rollout-a.jsonl",
+                    "no session metadata found",
+                )
+            ],
+            in_window=0,
+            total_tool_calls=0,
+            mcp_tool_calls=0,
+            servers_queried_ok=0,
+            servers_query_failed=[],
+            config_warnings=[],
+        )
+
+        rendered = render_coverage_text(coverage)
+
+        self.assertIn(
+            "~/.codex/sessions/2026/06/rollout-a.jsonl: "
+            "no session metadata found",
+            rendered,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
