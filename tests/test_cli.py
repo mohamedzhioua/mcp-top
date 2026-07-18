@@ -431,7 +431,10 @@ class CliTests(unittest.TestCase):
             },
         )
 
-        _, output = self._run("--prune")
+        # Project-scope servers are inventory-only by default (F1); opt in
+        # with --query-project (a trusted repo) to exercise the reactivation
+        # simulation end to end.
+        _, output = self._run("--prune", "--query-project")
 
         self.assertIn("Prune candidates", output)
         self.assertIn("shared", output)
@@ -473,6 +476,124 @@ class CliTests(unittest.TestCase):
         evidence = json_payload["clis"][0]["servers"][0]["regime_evidence"]
         self.assertEqual(len(evidence), 2)
         self.assertTrue(all(item.endswith("=unrecognized") for item in evidence))
+
+    def test_protocol_error_sentinel_appears_in_no_output_mode(self) -> None:
+        sentinel = "sk_live_DO_NOT_LEAK"
+        self._set_servers(
+            {
+                "bad": {
+                    "command": sys.executable,
+                    "args": [FAKE_SERVER, "serve-error", sentinel],
+                }
+            }
+        )
+
+        outputs = []
+        for options in (
+            (),
+            ("--json",),
+            ("--prune",),
+            ("--json", "--prune"),
+        ):
+            exit_code, output = self._run(*options)
+            self.assertEqual(exit_code, 0)
+            outputs.append(output)
+
+        for output in outputs:
+            self.assertNotIn(sentinel, output)
+            self.assertNotIn("boom", output)
+        self.assertIn("initialize failed (code -32000)", outputs[0])
+        json_payload = json.loads(outputs[1])
+        server = next(
+            row
+            for row in json_payload["clis"][0]["servers"]
+            if row["server"] == "bad"
+        )
+        self.assertEqual(server["def_status"], "error")
+        self.assertEqual(server["def_error"], "initialize failed (code -32000)")
+
+    def test_project_scope_server_is_not_queried_by_default(self) -> None:
+        with open(
+            os.path.join(self.project, ".mcp.json"), "w", encoding="utf-8"
+        ) as handle:
+            json.dump(
+                {
+                    "mcpServers": {
+                        "repo-server": {
+                            "command": sys.executable,
+                            "args": [FAKE_SERVER, "serve"],
+                        }
+                    }
+                },
+                handle,
+            )
+
+        exit_code, output = self._run("--json")
+
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(output)
+        row = next(
+            row
+            for row in payload["clis"][0]["servers"]
+            if row["server"] == "repo-server"
+        )
+        self.assertEqual(row["def_status"], "unsupported")
+        self.assertIn("project scope not queried by default", row["def_error"])
+        self.assertIn("--query-project", row["def_error"])
+        self.assertIsNone(row["advertised_max_tokens"])
+
+    def test_query_project_flag_launches_project_scope_server(self) -> None:
+        with open(
+            os.path.join(self.project, ".mcp.json"), "w", encoding="utf-8"
+        ) as handle:
+            json.dump(
+                {
+                    "mcpServers": {
+                        "repo-server": {
+                            "command": sys.executable,
+                            "args": [FAKE_SERVER, "serve"],
+                        }
+                    }
+                },
+                handle,
+            )
+
+        exit_code, output = self._run("--json", "--query-project")
+
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(output)
+        row = next(
+            row
+            for row in payload["clis"][0]["servers"]
+            if row["server"] == "repo-server"
+        )
+        self.assertEqual(row["def_status"], "ok")
+        self.assertIsNotNone(row["advertised_max_tokens"])
+
+    def test_reserved_server_name_is_never_queried(self) -> None:
+        self._set_servers(
+            {
+                "workspace": {
+                    "command": sys.executable,
+                    # An arg the fake server would hang forever on if ever
+                    # launched -- this must return instantly without a hang.
+                    "args": [FAKE_SERVER, "sleep", "unused.pid"],
+                }
+            }
+        )
+
+        exit_code, output = self._run("--json", "--timeout", "1")
+
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(output)
+        row = next(
+            row
+            for row in payload["clis"][0]["servers"]
+            if row["server"] == "workspace"
+        )
+        self.assertEqual(row["def_status"], "unsupported")
+        self.assertIn("reserved", row["def_error"])
+        self.assertIsNone(row["advertised_max_tokens"])
 
     def test_prune_reports_cursor_usage_unavailable(self) -> None:
         cursor_dir = os.path.join(self.home, ".cursor")
@@ -523,7 +644,9 @@ class CliTests(unittest.TestCase):
         self.assertIn("source_path", payload["recipe"])
         self.assertIn("scope", payload["recipe"])
 
-    def test_codex_recipe_targets_exact_toml_table(self) -> None:
+    def test_codex_recipe_is_guidance_with_exact_toml_table(self) -> None:
+        # Codex never gets an executable command (F6): a text-manipulation
+        # edit of a live TOML file can corrupt multiline strings/comments.
         suggestion = self._suggestion(
             'space "quote"; semi',
             source_path="/home/me/.codex/config.toml",
@@ -531,14 +654,12 @@ class CliTests(unittest.TestCase):
 
         recipe = cli._remediation_recipe("codex", suggestion)
 
-        self.assertEqual(recipe["kind"], "command")
+        self.assertEqual(recipe["kind"], "guidance")
+        self.assertNotIn("argv", recipe)
         self.assertEqual(recipe["source_path"], "/home/me/.codex/config.toml")
         self.assertEqual(recipe["scope"], "user")
-        self.assertEqual(recipe["argv"][0:2], ["python", "-c"])
-        self.assertNotIn("\n", recipe["argv"][2])
-        self.assertEqual(
-            recipe["argv"][-1],
-            '[mcp_servers."space \\"quote\\"; semi"]',
+        self.assertIn(
+            '[mcp_servers."space \\"quote\\"; semi"]', recipe["change"]
         )
         self.assertIn("enabled = false", recipe["change"])
 

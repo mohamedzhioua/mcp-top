@@ -593,7 +593,12 @@ class DiscoverServersTests(unittest.TestCase):
         )
         self.assertNotIn(sentinel, json.dumps(servers[0].regime_evidence))
 
-    def test_conflicting_tool_search_settings_are_unknown(self) -> None:
+    def test_project_settings_outrank_user_settings_for_the_same_key(
+        self,
+    ) -> None:
+        # Precedence, not accumulation: project's value for the same key
+        # wins outright over user's, rather than the two conflicting into
+        # "unknown".
         with tempfile.TemporaryDirectory() as home:
             project_dir = os.path.join(home, "project")
             os.mkdir(project_dir)
@@ -619,8 +624,161 @@ class DiscoverServersTests(unittest.TestCase):
             servers, warnings = discover_servers(home, project_dir)
 
         self.assertEqual(warnings, [])
+        self.assertEqual(servers[0].loading_regime, "upfront")
+        self.assertEqual(len(servers[0].regime_evidence), 1)
+        self.assertIn(project_settings, servers[0].regime_evidence[0])
+
+    def test_local_settings_outrank_project_settings(self) -> None:
+        with tempfile.TemporaryDirectory() as home:
+            project_dir = os.path.join(home, "project")
+            os.mkdir(project_dir)
+            self._write_json(
+                os.path.join(home, ".claude.json"),
+                {"mcpServers": {"srv": {"command": "run"}}},
+            )
+            project_settings = os.path.join(
+                project_dir, ".claude", "settings.json"
+            )
+            local_settings = os.path.join(
+                project_dir, ".claude", "settings.local.json"
+            )
+            os.makedirs(os.path.dirname(project_settings))
+            self._write_json(
+                project_settings, {"env": {"ENABLE_TOOL_SEARCH": "false"}}
+            )
+            self._write_json(
+                local_settings, {"env": {"ENABLE_TOOL_SEARCH": "true"}}
+            )
+
+            servers, warnings = discover_servers(home, project_dir)
+
+        self.assertEqual(warnings, [])
+        self.assertEqual(servers[0].loading_regime, "deferred")
+        self.assertIn(local_settings, servers[0].regime_evidence[0])
+
+    def test_managed_settings_outrank_every_other_layer(self) -> None:
+        with tempfile.TemporaryDirectory() as home:
+            project_dir = os.path.join(home, "project")
+            os.mkdir(project_dir)
+            self._write_json(
+                os.path.join(home, ".claude.json"),
+                {"mcpServers": {"srv": {"command": "run"}}},
+            )
+            local_settings = os.path.join(
+                project_dir, ".claude", "settings.local.json"
+            )
+            os.makedirs(os.path.dirname(local_settings))
+            self._write_json(
+                local_settings, {"env": {"ENABLE_TOOL_SEARCH": "true"}}
+            )
+            managed_path = os.path.join(home, "managed-settings.json")
+            self._write_json(
+                managed_path, {"env": {"ENABLE_TOOL_SEARCH": "false"}}
+            )
+
+            with mock.patch(
+                "mcp_top.config._managed_settings_path",
+                return_value=managed_path,
+            ):
+                servers, warnings = discover_servers(home, project_dir)
+
+        self.assertEqual(warnings, [])
+        self.assertEqual(servers[0].loading_regime, "upfront")
+        self.assertIn(managed_path, servers[0].regime_evidence[0])
+
+    def test_unreadable_managed_settings_forces_unknown(self) -> None:
+        with tempfile.TemporaryDirectory() as home:
+            self._write_json(
+                os.path.join(home, ".claude.json"),
+                {"mcpServers": {"srv": {"command": "run"}}},
+            )
+            user_settings = os.path.join(home, ".claude", "settings.json")
+            os.makedirs(os.path.dirname(user_settings))
+            self._write_json(
+                user_settings, {"env": {"ENABLE_TOOL_SEARCH": "true"}}
+            )
+            managed_path = os.path.join(home, "managed-settings.json")
+            with open(managed_path, "w", encoding="utf-8") as handle:
+                handle.write("{not json")
+
+            with mock.patch(
+                "mcp_top.config._managed_settings_path",
+                return_value=managed_path,
+            ):
+                servers, warnings = discover_servers(home, None)
+
         self.assertEqual(servers[0].loading_regime, "unknown")
-        self.assertEqual(len(servers[0].regime_evidence), 2)
+        self.assertEqual(len(servers[0].regime_evidence), 1)
+        self.assertIn("could not be read", servers[0].regime_evidence[0])
+        self.assertIn(
+            "higher-precedence override cannot be ruled out",
+            servers[0].regime_evidence[0],
+        )
+
+    def test_non_first_party_base_url_is_upfront_signal(self) -> None:
+        with tempfile.TemporaryDirectory() as home:
+            self._write_json(
+                os.path.join(home, ".claude.json"),
+                {"mcpServers": {"srv": {"command": "run"}}},
+            )
+            settings_path = os.path.join(home, ".claude", "settings.json")
+            os.makedirs(os.path.dirname(settings_path))
+            self._write_json(
+                settings_path,
+                {"env": {"ANTHROPIC_BASE_URL": "https://proxy.example.com/v1"}},
+            )
+
+            servers, warnings = discover_servers(home, None)
+
+        self.assertEqual(warnings, [])
+        self.assertEqual(servers[0].loading_regime, "upfront")
+        self.assertIn(
+            "env.ANTHROPIC_BASE_URL=non-first-party",
+            servers[0].regime_evidence[0],
+        )
+        self.assertNotIn("proxy.example.com", json.dumps(servers[0].regime_evidence))
+
+    def test_first_party_base_url_is_ignored(self) -> None:
+        with tempfile.TemporaryDirectory() as home:
+            self._write_json(
+                os.path.join(home, ".claude.json"),
+                {"mcpServers": {"srv": {"command": "run"}}},
+            )
+            settings_path = os.path.join(home, ".claude", "settings.json")
+            os.makedirs(os.path.dirname(settings_path))
+            self._write_json(
+                settings_path,
+                {"env": {"ANTHROPIC_BASE_URL": "https://api.anthropic.com"}},
+            )
+
+            servers, warnings = discover_servers(home, None)
+
+        self.assertEqual(warnings, [])
+        self.assertEqual(servers[0].loading_regime, "unknown")
+        self.assertEqual(servers[0].regime_evidence, [])
+
+    def test_reserved_server_names_are_marked_unsupported(self) -> None:
+        with tempfile.TemporaryDirectory() as home:
+            self._write_json(
+                os.path.join(home, ".claude.json"),
+                {
+                    "mcpServers": {
+                        "workspace": {"command": "run"},
+                        "claude-in-chrome": {"command": "run"},
+                        "computer-use": {"command": "run"},
+                        "ordinary": {"command": "run"},
+                    }
+                },
+            )
+
+            servers, warnings = discover_servers(home, None)
+
+        self.assertEqual(warnings, [])
+        by_name = {server.name: server for server in servers}
+        self.assertTrue(by_name["workspace"].reserved)
+        self.assertTrue(by_name["claude-in-chrome"].reserved)
+        self.assertTrue(by_name["computer-use"].reserved)
+        self.assertFalse(by_name["ordinary"].reserved)
 
     def _write_json(self, path: str, data: object) -> None:
         with open(path, "w", encoding="utf-8") as handle:

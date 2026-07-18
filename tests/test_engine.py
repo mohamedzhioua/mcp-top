@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import math
 import unittest
 
 import _path  # noqa: F401
@@ -117,11 +118,11 @@ class EngineTests(unittest.TestCase):
         row = report.rows[0]
         self.assertEqual(
             row.advertised_max_tokens,
-            TokenCount(tokens=56, exact=False),
+            TokenCount(tokens=66, exact=False),
         )
         self.assertEqual(
             row.upfront_floor_tokens,
-            TokenCount(tokens=38, exact=False),
+            TokenCount(tokens=46, exact=False),
         )
         self.assertEqual(row.loading_regime, "deferred")
 
@@ -138,7 +139,7 @@ class EngineTests(unittest.TestCase):
         )
 
         row = report.rows[0]
-        expected = TokenCount(tokens=56, exact=False)
+        expected = TokenCount(tokens=66, exact=False)
         self.assertEqual(row.advertised_max_tokens, expected)
         self.assertEqual(row.upfront_floor_tokens, expected)
 
@@ -160,11 +161,11 @@ class EngineTests(unittest.TestCase):
         row = report.rows[0]
         self.assertEqual(
             row.upfront_floor_tokens,
-            TokenCount(tokens=1030, exact=False),
+            TokenCount(tokens=1035, exact=False),
         )
         self.assertEqual(
             row.advertised_max_tokens,
-            TokenCount(tokens=1030, exact=False),
+            TokenCount(tokens=1035, exact=False),
         )
 
     def test_prior_instruction_inversion_repro_obeys_range_invariant(self) -> None:
@@ -183,8 +184,8 @@ class EngineTests(unittest.TestCase):
         report = build_cli_report("claude-code", [server], definitions, [], None)
 
         row = report.rows[0]
-        self.assertEqual(row.upfront_floor_tokens.tokens, 101)
-        self.assertEqual(row.advertised_max_tokens.tokens, 102)
+        self.assertEqual(row.upfront_floor_tokens.tokens, 104)
+        self.assertEqual(row.advertised_max_tokens.tokens, 106)
         self.assertLessEqual(
             row.upfront_floor_tokens.tokens,
             row.advertised_max_tokens.tokens,
@@ -211,6 +212,52 @@ class EngineTests(unittest.TestCase):
         expected = TokenCount(tokens=0, exact=True)
         self.assertEqual(row.advertised_max_tokens, expected)
         self.assertEqual(row.upfront_floor_tokens, expected)
+
+    def test_zero_tools_with_instructions_excludes_phantom_tool_cost(
+        self,
+    ) -> None:
+        # Zero tools plus instructions must attribute the whole range to
+        # instructions alone -- never a nonzero "advertised tool" cost.
+        server = self._server("alpha")
+        definitions = [
+            ServerTools(
+                server="alpha",
+                status="ok",
+                error=None,
+                instructions="hello world",
+                tools=[],
+            )
+        ]
+
+        report = build_cli_report("claude-code", [server], definitions, [], None)
+
+        row = report.rows[0]
+        expected = TokenCount(tokens=3, exact=False)
+        self.assertEqual(row.tool_count, 0)
+        self.assertEqual(row.advertised_max_tokens, expected)
+        self.assertEqual(row.upfront_floor_tokens, expected)
+
+    def test_claude_floor_uses_canonical_client_visible_tool_name(self) -> None:
+        # A deferred tool's floor contribution must be the client-visible
+        # mcp__<server>__<tool> name Claude actually shows, not the raw name.
+        server = self._server("alpha")
+        server.loading_regime = "deferred"
+        definitions = [
+            ServerTools(
+                server="alpha",
+                status="ok",
+                error=None,
+                tools=[{"name": "a"}],
+            )
+        ]
+
+        report = build_cli_report("claude-code", [server], definitions, [], None)
+
+        row = report.rows[0]
+        self.assertEqual(
+            row.upfront_floor_tokens,
+            TokenCount(tokens=math.ceil(len("mcp__alpha__a") / 4), exact=False),
+        )
 
     def test_empty_corpus_usage_is_no_data_not_prune(self) -> None:
         report = self._empty_window_report([])

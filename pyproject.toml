@@ -45,6 +45,9 @@ Issues = "https://github.com/mohamedzhioua/mcp-top/issues"
 [project.scripts]
 mcp-top = "mcp_top.cli:main"
 
+# The wheel ships only the mcp_top package (found under src/); it never picks
+# up tests/, bin/, or docs/. The sdist's fuller tree (tests + goldens + bin +
+# docs, a complete runnable test tree) is pinned separately via MANIFEST.in.
 [tool.setuptools]
 package-dir = { "" = "src" }
 

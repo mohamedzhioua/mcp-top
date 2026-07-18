@@ -82,44 +82,6 @@ CLIS = {
 }
 
 
-_CODEX_DISABLE_PROGRAM = """\
-import re
-import sys
-from pathlib import Path
-
-p = Path(sys.argv[1])
-h = sys.argv[2]
-lines = p.read_text(encoding="utf-8").splitlines()
-out = []
-inside = False
-wrote = False
-for line in lines:
-    s = line.strip()
-    if s == h:
-        inside = True
-    elif inside and re.match(r"\\s*\\[", line):
-        if not wrote:
-            out.append("enabled = false")
-            wrote = True
-        inside = False
-    if inside and re.match(r"\\s*enabled\\s*=", line):
-        if not wrote:
-            out.append("enabled = false")
-            wrote = True
-        continue
-    out.append(line)
-if inside and not wrote:
-    out.append("enabled = false")
-    wrote = True
-if not wrote:
-    raise SystemExit(f"table not found: {h}")
-p.write_text("\\n".join(out) + "\\n", encoding="utf-8")
-"""
-
-_CODEX_DISABLE_SCRIPT = (
-    "import sys;exec(" + repr(_CODEX_DISABLE_PROGRAM) + ")"
-)
-
 _TOML_BARE_KEY = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
@@ -170,6 +132,17 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="do not launch configured MCP servers",
     )
+    parser.add_argument(
+        "--query-project",
+        action="store_true",
+        help=(
+            "also launch project-scope MCP servers (Claude project "
+            ".mcp.json, Cursor project .cursor/mcp.json); off by default "
+            "because a project's config is untrusted input (e.g. a cloned "
+            "repo) and Claude Code itself gates project servers behind "
+            "workspace trust -- pass this only in trusted repos"
+        ),
+    )
     parser.add_argument("--json", action="store_true", help="emit JSON")
     parser.add_argument(
         "--prune",
@@ -202,7 +175,9 @@ def _build(args: argparse.Namespace) -> Report:
         entry = CLIS[cli_name]
         servers, warnings = entry["discover_servers"](args.home, args.project)
         server_tools_list = [
-            _load_server_tools(server, args.no_query, args.timeout)
+            _load_server_tools(
+                server, args.no_query, args.timeout, args.query_project
+            )
             for server in servers
         ]
         find_transcripts_func = entry["find_transcripts"]
@@ -242,8 +217,31 @@ def _build(args: argparse.Namespace) -> Report:
 
 
 def _load_server_tools(
-    server: ServerConfig, no_query: bool, timeout: float
+    server: ServerConfig,
+    no_query: bool,
+    timeout: float,
+    query_project: bool = False,
 ) -> ServerTools:
+    if server.reserved:
+        return ServerTools(
+            server=server.name,
+            status="unsupported",
+            error=(
+                "reserved Claude Code server name -- Claude Code skips it "
+                "at load time"
+            ),
+            tools=[],
+        )
+    if server.scope == "project" and not query_project:
+        return ServerTools(
+            server=server.name,
+            status="unsupported",
+            error=(
+                "project scope not queried by default; pass "
+                "--query-project in trusted repos"
+            ),
+            tools=[],
+        )
     if server.enabled is False:
         return ServerTools(
             server=server.name,
@@ -528,10 +526,18 @@ def _render_prune_block(report: Report) -> str:
 def _remediation_recipe(
     cli_name: str, item: PruneSuggestion
 ) -> dict[str, object]:
-    if item.kind != "suggestion":
-        return _guidance_recipe(cli_name, item)
+    """Return a recipe for a prune suggestion or candidate.
 
-    if cli_name == "claude-code":
+    Only Claude Code's clean suggestions get an executable command
+    (``claude mcp remove``). Codex clean suggestions get precise structured
+    guidance -- the exact file, ``[mcp_servers.<name>]`` table, and the
+    exact ``enabled = false`` line to add -- but never a command: a
+    text-manipulation edit of a live TOML file can corrupt multiline
+    strings or drop comments, so mcp-top never emits one. Everything else
+    (all candidates, and every Cursor recipe) is guidance-only too.
+    """
+
+    if item.kind == "suggestion" and cli_name == "claude-code":
         claude_scope = _claude_cli_scope(item.scope)
         return {
             "kind": "command",
@@ -549,26 +555,6 @@ def _remediation_recipe(
                 f"Remove {claude_scope}-scope Claude Code MCP server "
                 f"{item.server!r}; source config {item.source_path} "
                 f"({item.scope} scope)."
-            ),
-        }
-
-    if cli_name == "codex":
-        table = _codex_table_header(item.server)
-        return {
-            "kind": "command",
-            "source_path": item.source_path,
-            "scope": item.scope,
-            "argv": [
-                "python",
-                "-c",
-                _CODEX_DISABLE_SCRIPT,
-                item.source_path,
-                table,
-            ],
-            "change": (
-                f"Set enabled = false under {table} in {item.source_path} "
-                f"({item.scope} scope). For a single unused tool, prefer "
-                "disabled_tools in that table."
             ),
         }
 

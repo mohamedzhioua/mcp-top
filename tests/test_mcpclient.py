@@ -124,6 +124,19 @@ class McpClientTests(unittest.TestCase):
         self.assertEqual(result.status, "ok")
         self.assertEqual(result.unmatched_enabled_tools, [])
 
+    def test_protocol_error_is_reduced_to_a_safe_category(self) -> None:
+        sentinel = "sk_live_DO_NOT_LEAK"
+        config = self._config(
+            sys.executable, [FAKE_SERVER, "serve-error", sentinel]
+        )
+
+        result = list_server_tools(config, timeout=5)
+
+        self.assertEqual(result.status, "error")
+        self.assertEqual(result.error, "initialize failed (code -32000)")
+        self.assertNotIn(sentinel, result.error)
+        self.assertNotIn("boom", result.error)
+
     def test_timeout_returns_error_and_stops_child(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             pid_path = os.path.join(directory, "server.pid")

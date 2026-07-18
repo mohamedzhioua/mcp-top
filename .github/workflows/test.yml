@@ -44,11 +44,21 @@ jobs:
         run: |
           python -m pip install --upgrade build
           python -m build
+      - name: Resolve built wheel path
+        id: wheel
+        shell: bash
+        run: |
+          set -euo pipefail
+          # A bash glob over "$GITHUB_WORKSPACE"/dist/*.whl breaks on Windows
+          # when the workspace path contains backslashes; resolve it through
+          # pathlib instead and assert exactly one wheel was built.
+          wheel="$(python -c "import pathlib, sys; m = sorted(pathlib.Path('dist').glob('*.whl')); assert len(m) == 1, f'expected exactly one wheel in dist/, found: {m}'; print(m[0].as_posix())")"
+          echo "path=$wheel" >> "$GITHUB_OUTPUT"
       - name: Smoke-test built wheel
         shell: bash
         run: |
           set -euo pipefail
-          wheel="$(ls "$GITHUB_WORKSPACE"/dist/*.whl)"
+          wheel="${{ steps.wheel.outputs.path }}"
           python -m pip install --upgrade pipx uv
 
           export PIPX_HOME="$RUNNER_TEMP/pipx-home"

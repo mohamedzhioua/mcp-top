@@ -117,9 +117,10 @@ def build_cli_report(
 
     Verdict rules:
     ``usage_status == "unsupported"`` is always ``unknown``.
-    Zero measured calls are ``prune`` only when definition cost was measured;
-    otherwise they are ``review``. One through ``REVIEW_THRESHOLD`` (3)
-    measured calls are ``review``, and more than 3 measured calls is ``keep``.
+    Zero measured calls are ``prune`` only when definition cost was actually
+    observed (estimated from the queried tool definitions); otherwise they
+    are ``review``. One through ``REVIEW_THRESHOLD`` (3) measured calls are
+    ``review``, and more than 3 measured calls is ``keep``.
     Unconfigured MCP servers are retained so transcript usage is never silently
     dropped.
     """
@@ -256,6 +257,10 @@ def _prune_suggestions(
         cfg = config_by_name.get(row.server)
         if cfg is None:
             continue
+        if cfg.reserved:
+            # Claude Code never loads a reserved-name server; a removal
+            # recipe for it would be phantom advice.
+            continue
 
         reasons: list[str] = []
         reactivation: Reactivation | None = None
@@ -344,48 +349,81 @@ def _context_token_range(
     server: ServerConfig,
     cli_name: str,
 ) -> tuple[TokenCount | None, TokenCount | None]:
-    """Return one disjoint advertised-maximum/upfront-floor token range."""
+    """Return one disjoint advertised-maximum/upfront-floor token range.
+
+    ``advertised_max`` is the v0.3 whole-definition estimator summed over
+    every tool's full JSON (as the client would eventually load it), plus
+    server instructions -- the only component that never appears inside a
+    tool's own JSON. ``upfront_floor`` covers exactly what an upfront-loaded
+    client sees before any deferred schema loads: for a tool whose full
+    definition already loads upfront (server regime ``upfront``, or a
+    per-tool always-load marker), its whole-definition estimate is reused
+    (it already covers the bare name, so counting the name again would
+    double it); for a still-deferred tool, only its bare, client-visible
+    name loads upfront. Each component is counted exactly once in each
+    total, which keeps ``upfront_floor <= advertised_max`` provable rather
+    than incidental.
+    """
 
     if result.status != "ok":
         return None, None
 
     text_limit = _CLAUDE_TEXT_LIMIT_BYTES if cli_name == "claude-code" else None
-    upfront_components: list[TokenCount] = []
-    deferred_components: list[TokenCount] = []
-    names = [
-        tool["name"]
-        for tool in result.tools
-        if isinstance(tool.get("name"), str)
-    ]
-    if names:
-        upfront_components.append(estimate_text("\n".join(names)))
+    floor_components: list[TokenCount] = []
+    max_components: list[TokenCount] = []
+
     if result.instructions:
-        upfront_components.append(
-            estimate_text(_truncate_text(result.instructions, text_limit))
+        instructions_estimate = estimate_text(
+            _truncate_text(result.instructions, text_limit)
         )
+        floor_components.append(instructions_estimate)
+        max_components.append(instructions_estimate)
 
     for tool in result.tools:
-        definition = _definition_without_name(tool, text_limit)
-        estimate = estimate_tool_definition(definition)
-        if server.loading_regime == "upfront" or _is_always_loaded_tool(tool):
-            upfront_components.append(estimate)
-        else:
-            deferred_components.append(estimate)
+        raw_name = tool.get("name")
+        canonical_name = (
+            _canonical_tool_name(raw_name, server.name, cli_name)
+            if isinstance(raw_name, str)
+            else None
+        )
+        whole_definition = _truncated_definition(tool, canonical_name, text_limit)
+        whole_estimate = estimate_tool_definition(whole_definition)
+        max_components.append(whole_estimate)
 
-    upfront_floor = _sum_token_counts(upfront_components)
-    advertised_max = _sum_token_counts(
-        [*upfront_components, *deferred_components]
-    )
+        if server.loading_regime == "upfront" or _is_always_loaded_tool(tool):
+            floor_components.append(whole_estimate)
+        elif canonical_name is not None:
+            floor_components.append(estimate_text(canonical_name))
+
+    upfront_floor = _sum_token_counts(floor_components)
+    advertised_max = _sum_token_counts(max_components)
     _enforce_token_range(advertised_max, upfront_floor)
     return advertised_max, upfront_floor
 
 
-def _definition_without_name(tool: dict, text_limit: int | None) -> dict:
-    """Return the definition-only component, excluding its advertised name."""
+def _canonical_tool_name(tool_name: str, server_name: str, cli_name: str) -> str:
+    """Return the name the client actually shows/consumes tokens for.
+
+    Claude Code exposes MCP tools under a client-visible
+    ``mcp__<server>__<tool>`` name (https://code.claude.com/docs/en/
+    agent-sdk/mcp); other CLIs are not documented to rename tools, so the
+    raw name is used as-is.
+    """
+
+    if cli_name == "claude-code":
+        return f"mcp__{server_name}__{tool_name}"
+    return tool_name
+
+
+def _truncated_definition(
+    tool: dict, canonical_name: str | None, text_limit: int | None
+) -> dict:
+    """Return the whole tool definition with its client-visible name and
+    Claude's documented 2KB description truncation applied."""
 
     definition = dict(tool)
-    if isinstance(tool.get("name"), str):
-        definition.pop("name")
+    if canonical_name is not None:
+        definition["name"] = canonical_name
     description = definition.get("description")
     if isinstance(description, str):
         definition["description"] = _truncate_text(description, text_limit)

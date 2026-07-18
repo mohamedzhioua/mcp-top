@@ -9,12 +9,27 @@ from __future__ import annotations
 import json
 import math
 import os
+import sys
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import urlsplit
 
 
 _MISSING = object()
+
+# Claude Code skips servers with these names at load time regardless of
+# config (https://code.claude.com/docs/en/mcp): they are reserved for
+# built-in features. Never query or recommend removal for them.
+_RESERVED_CLAUDE_SERVER_NAMES = frozenset(
+    {
+        "workspace",
+        "claude-in-chrome",
+        "computer-use",
+        "Claude Preview",
+        "Claude Browser",
+    }
+)
 
 # Relative precedence of the config scopes, low to high. Only the ordering
 # matters: a higher number wins and shadows lower-numbered same-name entries.
@@ -55,6 +70,7 @@ class ServerConfig:
     resolution_caveat: str | None = None
     loading_regime: str = "unknown"
     regime_evidence: list[str] = field(default_factory=list)
+    reserved: bool = False
 
 
 def discover_servers(
@@ -123,7 +139,21 @@ def discover_servers(
         servers.values(),
         _claude_tool_search_signals(home, project_dir, warnings),
     )
+    _apply_reserved_names(servers.values())
     return list(servers.values()), warnings
+
+
+def _apply_reserved_names(servers: Iterable[ServerConfig]) -> None:
+    """Mark servers whose name Claude Code reserves and always skips.
+
+    Reserved servers are never queried and never recommended for removal --
+    Claude Code itself never loads them, so any measured cost or prune
+    recipe for them would be phantom.
+    """
+
+    for server in servers:
+        if server.name in _RESERVED_CLAUDE_SERVER_NAMES:
+            server.reserved = True
 
 
 def _read_json_object(path: str, warnings: list[str]) -> dict[str, Any] | None:
@@ -307,73 +337,202 @@ class _RegimeSignal:
     override: bool = False
 
 
+@dataclass(frozen=True)
+class _SettingsLayer:
+    """One Claude Code settings scope, in precedence order.
+
+    ``settings`` is ``None`` when the file does not exist. ``unreadable`` is
+    true only when the file exists but could not be parsed/read -- a
+    distinct state from "absent", because an unreadable higher-precedence
+    layer may hide a signal that would otherwise win.
+    """
+
+    name: str
+    path: str
+    settings: dict[str, Any] | None
+    unreadable: bool
+
+
+def _managed_settings_path() -> str:
+    """Return the platform managed (organization-provisioned) settings path.
+
+    Managed settings are the highest-precedence Claude Code settings scope
+    (https://code.claude.com/docs/en/settings) and are provisioned by IT/
+    organization policy outside the user's control.
+    """
+
+    if os.name == "nt":
+        # C:\ProgramData\ClaudeCode is the legacy location, unsupported since
+        # Claude Code v2.1.75; the documented path is under Program Files.
+        root = os.environ.get("ProgramFiles", r"C:\Program Files")
+        return os.path.join(root, "ClaudeCode", "managed-settings.json")
+    if sys.platform == "darwin":
+        return "/Library/Application Support/ClaudeCode/managed-settings.json"
+    return "/etc/claude-code/managed-settings.json"
+
+
+def _claude_settings_layers(
+    home: str, project_dir: str | None, warnings: list[str]
+) -> list[_SettingsLayer]:
+    """Return Claude Code settings layers, highest precedence first.
+
+    Order: managed > local (project ``.claude/settings.local.json``) >
+    project (project ``.claude/settings.json``) > user
+    (``~/.claude/settings.json``). See
+    https://code.claude.com/docs/en/settings.
+    """
+
+    specs = [("managed", _managed_settings_path())]
+    if project_dir is not None:
+        specs.append(
+            ("local", os.path.join(project_dir, ".claude", "settings.local.json"))
+        )
+        specs.append(
+            ("project", os.path.join(project_dir, ".claude", "settings.json"))
+        )
+    specs.append(("user", os.path.join(home, ".claude", "settings.json")))
+
+    layers: list[_SettingsLayer] = []
+    for name, path in specs:
+        if not os.path.exists(path):
+            layers.append(_SettingsLayer(name, path, None, unreadable=False))
+            continue
+        before = len(warnings)
+        settings = _read_json_object(path, warnings)
+        unreadable = settings is None and len(warnings) > before
+        layers.append(_SettingsLayer(name, path, settings, unreadable))
+    return layers
+
+
+def _resolve_key(
+    layers: list[_SettingsLayer], section: str, key: str
+) -> tuple[Any, str | None]:
+    """Return ``(value, source_path)`` from the highest-precedence layer whose
+    settings explicitly define ``section.key``, honoring per-key override
+    semantics (a layer that omits a key inherits the next layer's value for
+    it). Returns ``(_MISSING, None)`` when no layer defines the key.
+    """
+
+    for layer in layers:
+        if layer.settings is None:
+            continue
+        section_value = layer.settings.get(section)
+        if isinstance(section_value, dict) and key in section_value:
+            return section_value[key], layer.path
+    return _MISSING, None
+
+
+def _anthropic_base_url_category(value: Any) -> str | None:
+    """Return whether ``ANTHROPIC_BASE_URL`` points at a first-party host.
+
+    Tool Search is documented as disabled when the client talks to a
+    non-first-party (custom) base URL. Only the host is inspected -- never
+    the full value -- so a URL embedding credentials never reaches evidence.
+    """
+
+    if value is _MISSING or value is None or value == "":
+        return None
+    if not isinstance(value, str):
+        return "unrecognized"
+    try:
+        host = (urlsplit(value).hostname or "").casefold()
+    except ValueError:
+        return "unrecognized"
+    if not host:
+        return "unrecognized"
+    if host == "anthropic.com" or host.endswith(".anthropic.com"):
+        return "first-party"
+    return "non-first-party"
+
+
 def _claude_tool_search_signals(
     home: str, project_dir: str | None, warnings: list[str]
 ) -> list[_RegimeSignal]:
-    """Return locally observable Claude Code Tool Search settings signals."""
+    """Resolve the Claude Code Tool Search regime by settings precedence.
 
-    paths = [os.path.join(home, ".claude", "settings.json")]
-    if project_dir is not None:
-        paths.extend(
-            [
-                os.path.join(project_dir, ".claude", "settings.json"),
-                os.path.join(project_dir, ".claude", "settings.local.json"),
-            ]
-        )
+    Managed > local > project > user (see
+    https://code.claude.com/docs/en/settings). The highest-precedence layer
+    that explicitly sets a given key wins that key; an unreadable
+    higher-precedence layer forces ``unknown`` for every signal, because a
+    hidden overriding key in that layer cannot be ruled out.
+    """
+
+    layers = _claude_settings_layers(home, project_dir, warnings)
+
+    unreadable = next((layer for layer in layers if layer.unreadable), None)
+    if unreadable is not None:
+        return [
+            _RegimeSignal(
+                "unknown",
+                f"{unreadable.path}: {unreadable.name} settings exist but "
+                "could not be read -- a higher-precedence override cannot "
+                "be ruled out",
+            )
+        ]
+
     signals: list[_RegimeSignal] = []
-    for path in paths:
-        settings = _read_json_object(path, warnings)
-        if settings is None:
-            continue
-        env = settings.get("env")
-        if isinstance(env, dict):
-            beta_category = _disable_betas_category(
-                env.get("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS", _MISSING)
+
+    beta_value, beta_path = _resolve_key(
+        layers, "env", "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS"
+    )
+    beta_category = _disable_betas_category(beta_value)
+    if beta_category == "set":
+        # Documented rule: a set beta-disable keeps Tool Search off and
+        # ENABLE_TOOL_SEARCH cannot override it -- resolve immediately.
+        return [
+            _RegimeSignal(
+                "upfront",
+                f"{beta_path}:env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=set",
+                override=True,
             )
-            if beta_category is not None:
-                signals.append(
-                    _RegimeSignal(
-                        "upfront" if beta_category == "set" else "unknown",
-                        (
-                            f"{path}:env."
-                            "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS="
-                            f"{beta_category}"
-                        ),
-                        override=beta_category == "set",
-                    )
-                )
-            tool_search_category = _tool_search_category(
-                env.get("ENABLE_TOOL_SEARCH", _MISSING)
+        ]
+    if beta_category is not None:
+        signals.append(
+            _RegimeSignal(
+                "unknown",
+                f"{beta_path}:env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS="
+                f"{beta_category}",
             )
-            if tool_search_category is not None:
-                evidence = (
-                    f"{path}:env.ENABLE_TOOL_SEARCH={tool_search_category}"
+        )
+
+    tool_search_value, tool_search_path = _resolve_key(
+        layers, "env", "ENABLE_TOOL_SEARCH"
+    )
+    tool_search_category = _tool_search_category(tool_search_value)
+    if tool_search_category is not None:
+        evidence = f"{tool_search_path}:env.ENABLE_TOOL_SEARCH={tool_search_category}"
+        if tool_search_category == "false":
+            signals.append(_RegimeSignal("upfront", evidence))
+        elif tool_search_category == "true":
+            signals.append(_RegimeSignal("deferred", evidence))
+        else:
+            signals.append(_RegimeSignal("unknown", evidence))
+
+    base_url_value, base_url_path = _resolve_key(layers, "env", "ANTHROPIC_BASE_URL")
+    if _anthropic_base_url_category(base_url_value) == "non-first-party":
+        signals.append(
+            _RegimeSignal(
+                "upfront",
+                f"{base_url_path}:env.ANTHROPIC_BASE_URL=non-first-party",
+            )
+        )
+
+    deny_value, deny_path = _resolve_key(layers, "permissions", "deny")
+    if isinstance(deny_value, list):
+        rules = [item for item in deny_value if isinstance(item, str)]
+        if any(_denies_tool_search(item) for item in rules):
+            signals.append(
+                _RegimeSignal(
+                    "upfront", f"{deny_path}:permissions.deny=ToolSearch"
                 )
-                if tool_search_category == "false":
-                    signals.append(_RegimeSignal("upfront", evidence))
-                elif tool_search_category == "true":
-                    signals.append(_RegimeSignal("deferred", evidence))
-                else:
-                    signals.append(_RegimeSignal("unknown", evidence))
-        permissions = settings.get("permissions")
-        if isinstance(permissions, dict):
-            denied = permissions.get("deny")
-            if isinstance(denied, list):
-                rules = [item for item in denied if isinstance(item, str)]
-                if any(_denies_tool_search(item) for item in rules):
-                    signals.append(
-                        _RegimeSignal(
-                            "upfront",
-                            f"{path}:permissions.deny=ToolSearch",
-                        )
-                    )
-                elif any(_scopes_tool_search_denial(item) for item in rules):
-                    signals.append(
-                        _RegimeSignal(
-                            "unknown",
-                            f"{path}:permissions.deny=ToolSearch(...)"
-                        )
-                    )
+            )
+        elif any(_scopes_tool_search_denial(item) for item in rules):
+            signals.append(
+                _RegimeSignal(
+                    "unknown", f"{deny_path}:permissions.deny=ToolSearch(...)"
+                )
+            )
+
     return signals
 
 
