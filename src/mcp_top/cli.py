@@ -9,6 +9,7 @@ import re
 import shlex
 import sys
 from dataclasses import asdict
+from datetime import datetime, timezone
 
 from mcp_top import __version__
 from mcp_top.adapters import claude_code, codex as codex_adapter
@@ -27,6 +28,14 @@ from mcp_top.engine import (
 )
 from mcp_top.mcpclient import ServerTools, list_server_tools
 from mcp_top.projects import claude_project_slug, normalize_project_key
+from mcp_top.snapshot import (
+    SnapshotLoadError,
+    build_snapshot,
+    diff_snapshots,
+    load_snapshot_file,
+    render_diff_human,
+    snapshot_to_dict,
+)
 from mcp_top.tokens import TokenCount, fmt
 
 
@@ -105,7 +114,40 @@ def main(argv: list[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
     try:
+        if args.command == "diff":
+            old_snapshot = load_snapshot_file(args.old)
+            new_snapshot = load_snapshot_file(args.new)
+            diff = diff_snapshots(old_snapshot, new_snapshot)
+            if args.json:
+                print(json.dumps(diff, sort_keys=True))
+            else:
+                print(render_diff_human(diff))
+            return 0
         report = _build(args)
+        if args.command == "snapshot":
+            snapshot = build_snapshot(
+                report,
+                datetime.now(timezone.utc),
+                default_sessions=args.sessions,
+                default_days=args.days,
+                redact_identifiers=args.redact_identifiers,
+            )
+            rendered = json.dumps(snapshot_to_dict(snapshot), sort_keys=True)
+            if args.out is None:
+                print(rendered)
+            else:
+                try:
+                    with open(args.out, "w", encoding="utf-8") as handle:
+                        handle.write(rendered)
+                        handle.write("\n")
+                except OSError as err:
+                    print(
+                        "mcp-top snapshot: cannot write output: "
+                        f"{err.strerror or err}",
+                        file=sys.stderr,
+                    )
+                    return 2
+            return 0
         if args.json:
             print(
                 json.dumps(
@@ -116,35 +158,101 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print(_render_human(report, include_prune=args.prune))
         return 0
+    except SnapshotLoadError as err:
+        print(f"mcp-top diff: {err}", file=sys.stderr)
+        return 2
     except Exception as err:
         print(f"mcp-top: internal error: {err}", file=sys.stderr)
         return 2
 
 
 def _parser() -> argparse.ArgumentParser:
+    common = argparse.ArgumentParser(add_help=False)
+    _add_common_arguments(common, default_values=True)
+    subcommand_common = argparse.ArgumentParser(add_help=False)
+    _add_common_arguments(subcommand_common, default_values=False)
     parser = argparse.ArgumentParser(
         prog="mcp-top",
         description="Rank configured MCP servers by definition cost and recent usage.",
+        parents=[common],
     )
-    parser.add_argument("--home", default=os.path.expanduser("~"))
-    parser.add_argument("--project", default=os.getcwd())
-    parser.add_argument("--sessions", type=_positive_int, default=30)
-    parser.add_argument("--days", type=_positive_int, default=30)
-    parser.add_argument("--timeout", type=_positive_float, default=20.0)
+    parser.add_argument(
+        "--version", action="version", version=f"%(prog)s {__version__}"
+    )
+    subparsers = parser.add_subparsers(dest="command")
+    snapshot = subparsers.add_parser(
+        "snapshot",
+        parents=[subcommand_common],
+        help="emit a redacted aggregate snapshot",
+    )
+    snapshot.add_argument(
+        "--out",
+        metavar="FILE",
+        help=(
+            "write the snapshot to FILE instead of stdout; overwrites FILE "
+            "if it exists"
+        ),
+    )
+    snapshot.add_argument(
+        "--redact-identifiers",
+        action="store_true",
+        help="pseudonymize server and called-tool names in the snapshot",
+    )
+    diff = subparsers.add_parser(
+        "diff",
+        parents=[subcommand_common],
+        help="compare two redacted aggregate snapshots",
+    )
+    diff.add_argument("old")
+    diff.add_argument("new")
+    return parser
+
+
+def _add_common_arguments(
+    parser: argparse.ArgumentParser,
+    *,
+    default_values: bool,
+) -> None:
+    default = None if default_values else argparse.SUPPRESS
+    parser.add_argument(
+        "--home",
+        default=os.path.expanduser("~") if default_values else default,
+    )
+    parser.add_argument(
+        "--project",
+        default=os.getcwd() if default_values else default,
+    )
+    parser.add_argument(
+        "--sessions",
+        type=_positive_int,
+        default=30 if default_values else default,
+    )
+    parser.add_argument(
+        "--days",
+        type=_positive_int,
+        default=30 if default_values else default,
+    )
+    parser.add_argument(
+        "--timeout",
+        type=_positive_float,
+        default=20.0 if default_values else default,
+    )
     parser.add_argument(
         "--cli",
         choices=[*CLIS.keys(), "all"],
-        default="all",
+        default="all" if default_values else default,
         help="CLI transcript/config source to inspect",
     )
     parser.add_argument(
         "--no-query",
         action="store_true",
+        default=False if default_values else default,
         help="do not launch configured MCP servers",
     )
     parser.add_argument(
         "--query-project",
         action="store_true",
+        default=False if default_values else default,
         help=(
             "also launch project-scope MCP servers (Claude project "
             ".mcp.json, Cursor project .cursor/mcp.json); off by default "
@@ -153,10 +261,16 @@ def _parser() -> argparse.ArgumentParser:
             "workspace trust -- pass this only in trusted repos"
         ),
     )
-    parser.add_argument("--json", action="store_true", help="emit JSON")
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        default=False if default_values else default,
+        help="emit JSON",
+    )
     parser.add_argument(
         "--project-usage",
         action="store_true",
+        default=False if default_values else default,
         help=(
             "restrict usage counts to the current --project (default counts "
             "usage across all projects); Codex uses the recorded cwd exactly, "
@@ -167,15 +281,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--prune",
         action="store_true",
+        default=False if default_values else default,
         help=(
             "append suggested removals and review candidates; never applied "
             "(mcp-top is read-only)"
         ),
     )
-    parser.add_argument(
-        "--version", action="version", version=f"%(prog)s {__version__}"
-    )
-    return parser
 
 
 def _build(args: argparse.Namespace) -> Report:

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import contextlib
+import copy
+from datetime import datetime, timezone
 import io
 import json
 import os
@@ -119,6 +121,201 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         self.assertEqual(output.getvalue(), self._read_golden("cli_json_v3.json"))
+
+    def test_snapshot_subcommand_emits_redacted_snapshot_to_stdout(self) -> None:
+        output = io.StringIO()
+        with mock.patch.object(cli, "_build", return_value=self._golden_report()):
+            with mock.patch.object(cli, "datetime") as fake_datetime:
+                fake_datetime.now.return_value = datetime(
+                    2026, 7, 18, 12, 0, tzinfo=timezone.utc
+                )
+                with contextlib.redirect_stdout(output):
+                    exit_code = cli.main(["snapshot"])
+
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["schema"], "mcp-top-snapshot/v1")
+        self.assertEqual(payload["generated_at"], "2026-07-18T12:00:00+00:00")
+        server = payload["clis"][0]["servers"][0]
+        self.assertEqual(server["server"], "alpha")
+        self.assertIn("called_tools", server)
+        self.assertNotIn("regime_evidence", server)
+        self.assertNotIn("def_error", server)
+        self.assertNotIn("/home/test", output.getvalue())
+
+    def test_snapshot_subcommand_writes_named_output_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            output_path = os.path.join(tempdir, "snapshot.json")
+            stdout = io.StringIO()
+            with mock.patch.object(cli, "_build", return_value=self._golden_report()):
+                with contextlib.redirect_stdout(stdout):
+                    exit_code = cli.main(["snapshot", "--out", output_path])
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(stdout.getvalue(), "")
+            with open(output_path, "r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+            self.assertEqual(payload["schema"], "mcp-top-snapshot/v1")
+
+    def test_snapshot_out_write_error_returns_2_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with mock.patch.object(cli, "_build", return_value=self._golden_report()):
+                with contextlib.redirect_stdout(stdout):
+                    with contextlib.redirect_stderr(stderr):
+                        exit_code = cli.main(["snapshot", "--out", tempdir])
+
+        self.assertEqual(exit_code, 2)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertIn(
+            "mcp-top snapshot: cannot write output:",
+            stderr.getvalue(),
+        )
+        self.assertNotIn("Traceback", stderr.getvalue())
+
+    def test_common_options_before_snapshot_survive_subparser(self) -> None:
+        cases = [
+            (["--no-query"], "no_query", True),
+            (["--home", self.home], "home", self.home),
+            (["--project", self.project], "project", self.project),
+            (["--cli", "codex"], "cli", "codex"),
+            (["--sessions", "7"], "sessions", 7),
+            (["--days", "11"], "days", 11),
+            (["--timeout", "1.25"], "timeout", 1.25),
+            (["--query-project"], "query_project", True),
+            (["--project-usage"], "project_usage", True),
+            (["--json"], "json", True),
+            (["--prune"], "prune", True),
+        ]
+
+        for option, attr, expected in cases:
+            with self.subTest(option=option):
+                before = cli._parser().parse_args([*option, "snapshot"])
+                after = cli._parser().parse_args(["snapshot", *option])
+                self.assertEqual(getattr(before, attr), expected)
+                self.assertEqual(getattr(after, attr), expected)
+
+    def test_json_before_diff_survives_subparser(self) -> None:
+        before = cli._parser().parse_args(["--json", "diff", "old", "new"])
+        after = cli._parser().parse_args(["diff", "old", "new", "--json"])
+
+        self.assertTrue(before.json)
+        self.assertTrue(after.json)
+
+    def test_diff_subcommand_compares_written_snapshots(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            old_path = os.path.join(tempdir, "old.json")
+            new_path = os.path.join(tempdir, "new.json")
+            self._write_snapshot(old_path, "alpha", calls=1)
+            self._write_snapshot(new_path, "alpha", calls=3)
+
+            human = io.StringIO()
+            with contextlib.redirect_stdout(human):
+                human_exit = cli.main(["diff", old_path, new_path])
+            json_output = io.StringIO()
+            with contextlib.redirect_stdout(json_output):
+                json_exit = cli.main(["diff", old_path, new_path, "--json"])
+
+        self.assertEqual(human_exit, 0)
+        self.assertIn("calls: 1 -> 3 (+2)", human.getvalue())
+        self.assertEqual(json_exit, 0)
+        payload = json.loads(json_output.getvalue())
+        self.assertEqual(payload["schema"], "mcp-top-diff/v1")
+        changed = payload["clis"][0]["changed"][0]
+        self.assertEqual(changed["calls"]["delta"], 2)
+
+    def test_diff_rejects_crafted_token_without_replaying_embedded_string(self) -> None:
+        secret = "sk_live_DO_NOT_REPLAY"
+        with tempfile.TemporaryDirectory() as tempdir:
+            crafted = os.path.join(tempdir, "crafted.json")
+            valid = os.path.join(tempdir, "valid.json")
+            payload = self._snapshot_payload("alpha", calls=1)
+            payload["clis"][0]["servers"][0]["advertised_max_tokens"][
+                "source_path"
+            ] = secret
+            with open(crafted, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle)
+            self._write_snapshot(valid, "alpha", calls=1)
+
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                with contextlib.redirect_stderr(stderr):
+                    exit_code = cli.main(["diff", crafted, valid])
+
+        self.assertEqual(exit_code, 2)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertIn("mcp-top diff:", stderr.getvalue())
+        self.assertNotIn(secret, stderr.getvalue())
+        self.assertNotIn("Traceback", stderr.getvalue())
+
+    def test_diff_rejects_invalid_snapshots_cleanly(self) -> None:
+        cases = [
+            ("clis null", lambda payload: payload.__setitem__("clis", None)),
+            ("missing clis", lambda payload: payload.pop("clis")),
+            (
+                "wrong type",
+                lambda payload: payload["clis"][0]["window"].__setitem__(
+                    "days", "30"
+                ),
+            ),
+            (
+                "duplicate server",
+                lambda payload: payload["clis"][0]["servers"].append(
+                    copy.deepcopy(payload["clis"][0]["servers"][0])
+                ),
+            ),
+            (
+                "negative count",
+                lambda payload: payload["clis"][0]["servers"][0].__setitem__(
+                    "calls", -1
+                ),
+            ),
+            (
+                "bool as int",
+                lambda payload: payload["clis"][0]["servers"][0].__setitem__(
+                    "calls", True
+                ),
+            ),
+        ]
+        with tempfile.TemporaryDirectory() as tempdir:
+            valid = os.path.join(tempdir, "valid.json")
+            self._write_snapshot(valid, "alpha", calls=1)
+            for name, mutate in cases:
+                with self.subTest(name=name):
+                    bad = os.path.join(tempdir, f"{name}.json")
+                    payload = self._snapshot_payload("alpha", calls=1)
+                    mutate(payload)
+                    with open(bad, "w", encoding="utf-8") as handle:
+                        json.dump(payload, handle)
+                    stdout = io.StringIO()
+                    stderr = io.StringIO()
+                    with contextlib.redirect_stdout(stdout):
+                        with contextlib.redirect_stderr(stderr):
+                            exit_code = cli.main(["diff", bad, valid])
+
+                    self.assertEqual(exit_code, 2)
+                    self.assertEqual(stdout.getvalue(), "")
+                    self.assertIn("mcp-top diff:", stderr.getvalue())
+                    self.assertNotIn("Traceback", stderr.getvalue())
+
+    def test_diff_bad_input_returns_2_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            wrong = os.path.join(tempdir, "wrong.json")
+            with open(wrong, "w", encoding="utf-8") as handle:
+                json.dump({"schema": "wrong"}, handle)
+            valid = os.path.join(tempdir, "valid.json")
+            self._write_snapshot(valid, "alpha", calls=1)
+
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                exit_code = cli.main(["diff", wrong, valid])
+
+        self.assertEqual(exit_code, 2)
+        self.assertIn("mcp-top diff:", stderr.getvalue())
+        self.assertIn("schema must be mcp-top-snapshot/v1", stderr.getvalue())
+        self.assertNotIn("Traceback", stderr.getvalue())
 
     def test_no_query_is_unsupported_but_successful(self) -> None:
         exit_code, output = self._run("--json", "--no-query")
@@ -971,6 +1168,52 @@ class CliTests(unittest.TestCase):
     def _read_golden(self, name: str) -> str:
         with open(os.path.join(GOLDENS, name), "r", encoding="utf-8") as handle:
             return handle.read()
+
+    def _snapshot_payload(self, server: str, calls: int) -> dict:
+        return {
+            "schema": "mcp-top-snapshot/v1",
+            "generated_at": "2026-07-18T12:00:00+00:00",
+            "identifiers_redacted": False,
+            "clis": [
+                {
+                    "cli": "claude-code",
+                    "window": {
+                        "sessions": 30,
+                        "days": 30,
+                        "sessions_considered": 1,
+                        "project_filter_active": False,
+                    },
+                    "recorded_results": None,
+                    "servers": [
+                        {
+                            "server": server,
+                            "scope": "user",
+                            "transport": "stdio",
+                            "loading_regime": "unknown",
+                            "advertised_max_tokens": {
+                                "value": 10,
+                                "exact": False,
+                            },
+                            "upfront_floor_tokens": {
+                                "value": 4,
+                                "exact": False,
+                            },
+                            "tool_count": 1,
+                            "calls": calls,
+                            "usage_status": "measured",
+                            "verdict": "review",
+                            "called_tools": {},
+                            "recorded_result_footprint": None,
+                        }
+                    ],
+                }
+            ],
+        }
+
+    def _write_snapshot(self, path: str, server: str, calls: int) -> None:
+        payload = self._snapshot_payload(server, calls)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle)
 
     def _usage_window(self, sessions_considered: int = 1) -> UsageWindow:
         return UsageWindow(
