@@ -419,6 +419,33 @@ class DiscoverServersTests(unittest.TestCase):
             servers[0].regime_evidence[0],
         )
 
+    def test_enable_tool_search_overrides_non_first_party_base_url(self) -> None:
+        with tempfile.TemporaryDirectory() as home:
+            self._write_json(
+                os.path.join(home, ".claude.json"),
+                {"mcpServers": {"srv": {"command": "run"}}},
+            )
+            settings_path = os.path.join(home, ".claude", "settings.json")
+            os.makedirs(os.path.dirname(settings_path))
+            self._write_json(
+                settings_path,
+                {
+                    "env": {
+                        "ENABLE_TOOL_SEARCH": "true",
+                        "ANTHROPIC_BASE_URL": "https://proxy.example.com/v1",
+                    }
+                },
+            )
+
+            servers, warnings = discover_servers(home, None)
+
+        self.assertEqual(warnings, [])
+        self.assertEqual(servers[0].loading_regime, "deferred")
+        self.assertEqual(
+            servers[0].regime_evidence,
+            [f"{settings_path}:env.ENABLE_TOOL_SEARCH=true"],
+        )
+
     def test_settings_disable_tool_search_is_upfront(self) -> None:
         with tempfile.TemporaryDirectory() as home:
             self._write_json(
@@ -441,6 +468,33 @@ class DiscoverServersTests(unittest.TestCase):
             servers[0].regime_evidence[0],
         )
 
+    def test_disable_tool_search_overrides_non_first_party_base_url(self) -> None:
+        with tempfile.TemporaryDirectory() as home:
+            self._write_json(
+                os.path.join(home, ".claude.json"),
+                {"mcpServers": {"srv": {"command": "run"}}},
+            )
+            settings_path = os.path.join(home, ".claude", "settings.json")
+            os.makedirs(os.path.dirname(settings_path))
+            self._write_json(
+                settings_path,
+                {
+                    "env": {
+                        "ENABLE_TOOL_SEARCH": "false",
+                        "ANTHROPIC_BASE_URL": "https://proxy.example.com/v1",
+                    }
+                },
+            )
+
+            servers, warnings = discover_servers(home, None)
+
+        self.assertEqual(warnings, [])
+        self.assertEqual(servers[0].loading_regime, "upfront")
+        self.assertEqual(
+            servers[0].regime_evidence,
+            [f"{settings_path}:env.ENABLE_TOOL_SEARCH=false"],
+        )
+
     def test_settings_auto_tool_search_is_unknown(self) -> None:
         with tempfile.TemporaryDirectory() as home:
             self._write_json(
@@ -459,8 +513,35 @@ class DiscoverServersTests(unittest.TestCase):
         self.assertEqual(warnings, [])
         self.assertEqual(servers[0].loading_regime, "unknown")
         self.assertIn(
-            "env.ENABLE_TOOL_SEARCH=auto:N",
+            "env.ENABLE_TOOL_SEARCH=auto:N (threshold mode; upfront if tools "
+            "fit configured context percentage, else deferred)",
             servers[0].regime_evidence[0],
+        )
+
+    def test_settings_auto_tool_search_uses_default_threshold_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as home:
+            self._write_json(
+                os.path.join(home, ".claude.json"),
+                {"mcpServers": {"srv": {"command": "run"}}},
+            )
+            settings_path = os.path.join(home, ".claude", "settings.json")
+            os.makedirs(os.path.dirname(settings_path))
+            self._write_json(
+                settings_path,
+                {"env": {"ENABLE_TOOL_SEARCH": "auto"}},
+            )
+
+            servers, warnings = discover_servers(home, None)
+
+        self.assertEqual(warnings, [])
+        self.assertEqual(servers[0].loading_regime, "unknown")
+        self.assertEqual(
+            servers[0].regime_evidence,
+            [
+                f"{settings_path}:env.ENABLE_TOOL_SEARCH=auto "
+                "(threshold mode; upfront if tools fit 10% context, else "
+                "deferred)"
+            ],
         )
 
     def test_settings_tool_search_denial_is_upfront(self) -> None:
@@ -483,6 +564,34 @@ class DiscoverServersTests(unittest.TestCase):
         self.assertIn(
             "permissions.deny=ToolSearch",
             servers[0].regime_evidence[0],
+        )
+
+    def test_tool_search_denial_contradicts_explicit_enable(self) -> None:
+        with tempfile.TemporaryDirectory() as home:
+            self._write_json(
+                os.path.join(home, ".claude.json"),
+                {"mcpServers": {"srv": {"command": "run"}}},
+            )
+            settings_path = os.path.join(home, ".claude", "settings.json")
+            os.makedirs(os.path.dirname(settings_path))
+            self._write_json(
+                settings_path,
+                {
+                    "env": {"ENABLE_TOOL_SEARCH": "true"},
+                    "permissions": {"deny": ["ToolSearch"]},
+                },
+            )
+
+            servers, warnings = discover_servers(home, None)
+
+        self.assertEqual(warnings, [])
+        self.assertEqual(servers[0].loading_regime, "unknown")
+        self.assertEqual(
+            servers[0].regime_evidence,
+            [
+                f"{settings_path}:env.ENABLE_TOOL_SEARCH=true contradicts "
+                f"{settings_path}:permissions.deny=ToolSearch"
+            ],
         )
 
     def test_scoped_tool_search_denial_is_unknown(self) -> None:
@@ -737,6 +846,55 @@ class DiscoverServersTests(unittest.TestCase):
             servers[0].regime_evidence[0],
         )
         self.assertNotIn("proxy.example.com", json.dumps(servers[0].regime_evidence))
+
+    def test_vertex_provider_is_upfront_signal(self) -> None:
+        with tempfile.TemporaryDirectory() as home:
+            self._write_json(
+                os.path.join(home, ".claude.json"),
+                {"mcpServers": {"srv": {"command": "run"}}},
+            )
+            settings_path = os.path.join(home, ".claude", "settings.json")
+            os.makedirs(os.path.dirname(settings_path))
+            self._write_json(
+                settings_path,
+                {"env": {"CLAUDE_CODE_USE_VERTEX": "1"}},
+            )
+
+            servers, warnings = discover_servers(home, None)
+
+        self.assertEqual(warnings, [])
+        self.assertEqual(servers[0].loading_regime, "upfront")
+        self.assertEqual(
+            servers[0].regime_evidence,
+            [f"{settings_path}:env.CLAUDE_CODE_USE_VERTEX=1"],
+        )
+
+    def test_enable_tool_search_overrides_vertex_provider_default(self) -> None:
+        with tempfile.TemporaryDirectory() as home:
+            self._write_json(
+                os.path.join(home, ".claude.json"),
+                {"mcpServers": {"srv": {"command": "run"}}},
+            )
+            settings_path = os.path.join(home, ".claude", "settings.json")
+            os.makedirs(os.path.dirname(settings_path))
+            self._write_json(
+                settings_path,
+                {
+                    "env": {
+                        "ENABLE_TOOL_SEARCH": "true",
+                        "CLAUDE_CODE_USE_VERTEX": "1",
+                    }
+                },
+            )
+
+            servers, warnings = discover_servers(home, None)
+
+        self.assertEqual(warnings, [])
+        self.assertEqual(servers[0].loading_regime, "deferred")
+        self.assertEqual(
+            servers[0].regime_evidence,
+            [f"{settings_path}:env.ENABLE_TOOL_SEARCH=true"],
+        )
 
     def test_first_party_base_url_is_ignored(self) -> None:
         with tempfile.TemporaryDirectory() as home:

@@ -455,6 +455,11 @@ def _claude_tool_search_signals(
     that explicitly sets a given key wins that key; an unreadable
     higher-precedence layer forces ``unknown`` for every signal, because a
     hidden overriding key in that layer cannot be ruled out.
+
+    Version-based inference is deliberately absent: current docs assert
+    deferred-by-default but do not document a version threshold. The regime is
+    also model-dependent; mcp-top avoids a model allow/deny list that would rot
+    across Claude model releases.
     """
 
     layers = _claude_settings_layers(home, project_dir, warnings)
@@ -495,18 +500,39 @@ def _claude_tool_search_signals(
             )
         )
 
+    deny_value, deny_path = _resolve_key(layers, "permissions", "deny")
+    denies_tool_search = False
+    scopes_tool_search_denial = False
+    if isinstance(deny_value, list):
+        rules = [item for item in deny_value if isinstance(item, str)]
+        denies_tool_search = any(_denies_tool_search(item) for item in rules)
+        scopes_tool_search_denial = any(
+            _scopes_tool_search_denial(item) for item in rules
+        )
+
     tool_search_value, tool_search_path = _resolve_key(
         layers, "env", "ENABLE_TOOL_SEARCH"
     )
     tool_search_category = _tool_search_category(tool_search_value)
     if tool_search_category is not None:
-        evidence = f"{tool_search_path}:env.ENABLE_TOOL_SEARCH={tool_search_category}"
+        evidence = _tool_search_evidence(tool_search_path, tool_search_category)
+        if tool_search_category == "true" and denies_tool_search:
+            signals.append(
+                _RegimeSignal(
+                    "unknown",
+                    f"{evidence} contradicts "
+                    f"{deny_path}:permissions.deny=ToolSearch",
+                )
+            )
+            return signals
         if tool_search_category == "false":
             signals.append(_RegimeSignal("upfront", evidence))
-        elif tool_search_category == "true":
+            return signals
+        if tool_search_category == "true":
             signals.append(_RegimeSignal("deferred", evidence))
-        else:
-            signals.append(_RegimeSignal("unknown", evidence))
+            return signals
+        signals.append(_RegimeSignal("unknown", evidence))
+        return signals
 
     base_url_value, base_url_path = _resolve_key(layers, "env", "ANTHROPIC_BASE_URL")
     if _anthropic_base_url_category(base_url_value) == "non-first-party":
@@ -517,21 +543,26 @@ def _claude_tool_search_signals(
             )
         )
 
-    deny_value, deny_path = _resolve_key(layers, "permissions", "deny")
-    if isinstance(deny_value, list):
-        rules = [item for item in deny_value if isinstance(item, str)]
-        if any(_denies_tool_search(item) for item in rules):
-            signals.append(
-                _RegimeSignal(
-                    "upfront", f"{deny_path}:permissions.deny=ToolSearch"
-                )
+    vertex_value, vertex_path = _resolve_key(layers, "env", "CLAUDE_CODE_USE_VERTEX")
+    if vertex_value == "1":
+        signals.append(
+            _RegimeSignal(
+                "upfront",
+                f"{vertex_path}:env.CLAUDE_CODE_USE_VERTEX=1",
             )
-        elif any(_scopes_tool_search_denial(item) for item in rules):
-            signals.append(
-                _RegimeSignal(
-                    "unknown", f"{deny_path}:permissions.deny=ToolSearch(...)"
-                )
-            )
+        )
+
+    if signals:
+        return signals
+
+    if denies_tool_search:
+        return [
+            _RegimeSignal("upfront", f"{deny_path}:permissions.deny=ToolSearch")
+        ]
+    if scopes_tool_search_denial:
+        return [
+            _RegimeSignal("unknown", f"{deny_path}:permissions.deny=ToolSearch(...)")
+        ]
 
     return signals
 
@@ -563,6 +594,21 @@ def _tool_search_category(value: Any) -> str | None:
     ):
         return "auto:N"
     return "unrecognized"
+
+
+def _tool_search_evidence(source_path: str | None, category: str) -> str:
+    evidence = f"{source_path}:env.ENABLE_TOOL_SEARCH={category}"
+    if category == "auto":
+        return (
+            f"{evidence} (threshold mode; upfront if tools fit 10% context, "
+            "else deferred)"
+        )
+    if category == "auto:N":
+        return (
+            f"{evidence} (threshold mode; upfront if tools fit configured "
+            "context percentage, else deferred)"
+        )
+    return evidence
 
 
 def _denies_tool_search(value: str) -> bool:
