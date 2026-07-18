@@ -190,6 +190,83 @@ class CountCallsTests(unittest.TestCase):
         self.assertEqual(usage.server_tool_counts, {"github": {"get_pr": 1}})
         self.assertEqual(usage.unattributed_mcp_calls, 1)
 
+    def test_recorded_result_footprint_follows_verdict_window(self) -> None:
+        sessions = [
+            self._session(
+                "current",
+                "2026-06-15T12:00:00Z",
+                [
+                    self._mcp_call(
+                        "mcp__github__search",
+                        "github",
+                        "search",
+                        "2026-06-15T12:00:00Z",
+                        result_bytes=8,
+                    ),
+                    self._mcp_call(
+                        "mcp__github__read",
+                        "github",
+                        "read",
+                        "2026-06-15T12:00:01Z",
+                        result_bytes=4,
+                        result_kind="partial",
+                    ),
+                    self._mcp_call(
+                        "mcp__github__unsupported",
+                        "github",
+                        "unsupported",
+                        "2026-06-15T12:00:02Z",
+                        result_bytes=0,
+                        result_kind="unsupported",
+                    ),
+                    self._mcp_call(
+                        "mcp__github__unmeasurable",
+                        "github",
+                        "unmeasurable",
+                        "2026-06-15T12:00:03Z",
+                        result_bytes=0,
+                        result_kind="unmeasurable",
+                    ),
+                    self._mcp_call(
+                        "mcp__github__no_result",
+                        "github",
+                        "no_result",
+                        "2026-06-15T12:00:04Z",
+                    ),
+                ],
+                unpaired_results=1,
+            ),
+            self._session(
+                "older",
+                "2026-06-14T12:00:00Z",
+                [
+                    self._mcp_call(
+                        "mcp__github__old",
+                        "github",
+                        "old",
+                        "2026-06-14T12:00:00Z",
+                        result_bytes=100,
+                    )
+                ],
+            ),
+        ]
+
+        usage = count_calls(
+            sessions,
+            [session.path for session in sessions],
+            window_sessions=1,
+            window_days=30,
+            now=NOW,
+        )
+
+        self.assertEqual(usage.server_result_bytes, {"github": [8, 4]})
+        self.assertEqual(usage.results_paired, 1)
+        self.assertEqual(usage.results_partial, 1)
+        self.assertEqual(usage.results_unsupported, 1)
+        self.assertEqual(usage.results_unmeasurable, 1)
+        self.assertEqual(usage.results_unpaired, 1)
+        self.assertEqual(usage.results_unpaired_calls, 1)
+
     def test_project_filter_uses_project_recent_groups_for_verdict_counts(self) -> None:
         sessions = [
             self._session(
@@ -336,6 +413,9 @@ class CountCallsTests(unittest.TestCase):
         last_ts: str | None,
         calls: list[ToolCall],
         project: str | None = None,
+        unpaired_results: int = 0,
+        unsupported_results: int = 0,
+        unmeasurable_results: int = 0,
     ) -> SessionResult:
         return SessionResult(
             path=path,
@@ -347,6 +427,9 @@ class CountCallsTests(unittest.TestCase):
             first_ts=last_ts,
             last_ts=last_ts,
             project=project,
+            unpaired_results=unpaired_results,
+            unsupported_results=unsupported_results,
+            unmeasurable_results=unmeasurable_results,
         )
 
     def _call(
@@ -362,7 +445,13 @@ class CountCallsTests(unittest.TestCase):
         )
 
     def _mcp_call(
-        self, raw: str, server: str, tool: str, timestamp: str
+        self,
+        raw: str,
+        server: str,
+        tool: str,
+        timestamp: str,
+        result_bytes: int | None = None,
+        result_kind: str = "paired",
     ) -> ToolCall:
         return ToolCall(
             raw=raw,
@@ -370,6 +459,8 @@ class CountCallsTests(unittest.TestCase):
             server=server,
             tool=tool,
             timestamp=timestamp,
+            result_bytes=result_bytes,
+            result_kind=result_kind if result_bytes is not None else None,
         )
 
 

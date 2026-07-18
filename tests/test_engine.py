@@ -85,6 +85,45 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(report.coverage.unattributed_mcp_calls, 3)
         self.assertEqual(report.coverage.servers_unsupported, 0)
 
+    def test_recorded_result_footprint_uses_nearest_rank_percentiles(self) -> None:
+        window = UsageWindow(
+            sessions_considered=1,
+            window_sessions=30,
+            window_days=30,
+            counts={"mcp__alpha__lookup": 4},
+            sidechain_counts={},
+            server_tool_counts={"alpha": {"lookup": 4}},
+            server_result_bytes={"alpha": [1, 4, 5, 36]},
+            results_paired=4,
+            results_partial=2,
+            results_unpaired=1,
+            results_unsupported=1,
+            results_unmeasurable=1,
+            results_unpaired_calls=1,
+        )
+
+        report = build_cli_report(
+            "claude-code",
+            [self._server("alpha")],
+            [self._tools("alpha", 1)],
+            [],
+            window,
+        )
+
+        footprint = report.rows[0].recorded_result_footprint
+        self.assertIsNotNone(footprint)
+        assert footprint is not None
+        self.assertEqual(footprint.results, 4)
+        self.assertTrue(footprint.lower_bound)
+        self.assertEqual(footprint.basis, "recorded_utf8_bytes")
+        self.assertEqual(footprint.token_estimate, "bytes/4")
+        self.assertEqual(footprint.total_bytes, 46)
+        self.assertEqual(footprint.total_tokens, TokenCount(12, False))
+        self.assertEqual(footprint.max_tokens, TokenCount(9, False))
+        self.assertEqual(footprint.p50_tokens, TokenCount(1, False))
+        self.assertEqual(footprint.p90_tokens, TokenCount(9, False))
+        self.assertFalse(hasattr(footprint, "results_paired"))
+
     def test_unsupported_usage_yields_unknown_and_nullable_calls(self) -> None:
         servers = [self._server("alpha")]
         definitions = [self._tools("alpha", 1)]

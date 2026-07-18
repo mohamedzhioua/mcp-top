@@ -6,7 +6,7 @@ import unittest
 
 import _path  # noqa: F401
 
-from mcp_top.coverage import Coverage, render_coverage_text
+from mcp_top.coverage import Coverage, RecordedResultsCoverage, render_coverage_text
 
 
 class CoverageTests(unittest.TestCase):
@@ -116,6 +116,7 @@ class CoverageTests(unittest.TestCase):
 
         self.assertIn("usage: unknown (no transcript adapter)", rendered)
         self.assertNotIn("0 in window; 0 tool calls (0 MCP)", rendered)
+        self.assertIsNone(coverage.recorded_results)
 
     def test_project_filter_renders_attribution_line_without_raw_key(self) -> None:
         coverage = Coverage(
@@ -142,6 +143,36 @@ class CoverageTests(unittest.TestCase):
             rendered,
         )
         self.assertNotIn("project-a", rendered)
+
+    def test_recorded_results_render_only_when_seen(self) -> None:
+        coverage = Coverage(
+            transcripts_found=1,
+            transcripts_parsed=1,
+            transcripts_skipped=[],
+            in_window=1,
+            total_tool_calls=1,
+            mcp_tool_calls=1,
+            servers_queried_ok=1,
+            servers_query_failed=[],
+            config_warnings=[],
+            recorded_results=RecordedResultsCoverage(
+                paired=2,
+                partial=1,
+                unsupported=1,
+                unmeasurable=1,
+                unpaired_results=1,
+                unpaired_calls=1,
+            ),
+        )
+
+        rendered = render_coverage_text(coverage)
+
+        self.assertIn(
+            "recorded results: 2 paired, 1 partial, 1 unsupported, "
+            "1 unmeasurable, 1 unpaired result(s), 1 unpaired call(s) "
+            "(recorded result footprint is a recorded-bytes lower bound)",
+            rendered,
+        )
 
     def test_shorten_codex_session_paths(self) -> None:
         coverage = Coverage(

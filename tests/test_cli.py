@@ -15,9 +15,10 @@ from unittest import mock
 import _path  # noqa: F401
 
 from mcp_top import cli
-from mcp_top.coverage import Coverage
+from mcp_top.coverage import Coverage, RecordedResultsCoverage
 from mcp_top.counter import UsageWindow
 from mcp_top.engine import CliReport, PruneSuggestion, Report, ServerRow
+from mcp_top.engine import RecordedResultFootprint
 from mcp_top.tokens import TokenCount
 
 
@@ -89,6 +90,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(server["usage_status"], "measured")
         self.assertEqual(server["verdict"], "review")
         self.assertEqual(server["filtered_tools"], 0)
+        self.assertIsNotNone(server["recorded_result_footprint"])
 
     def test_human_output_starts_with_coverage_then_table(self) -> None:
         exit_code, output = self._run()
@@ -259,9 +261,11 @@ class CliTests(unittest.TestCase):
         self.assertIsNone(server["calls"])
         self.assertEqual(server["usage_status"], "unsupported")
         self.assertEqual(server["verdict"], "unknown")
+        self.assertIsNone(server["recorded_result_footprint"])
         self.assertIsNone(payload["clis"][0]["coverage"]["in_window"])
         self.assertIsNone(payload["clis"][0]["coverage"]["total_tool_calls"])
         self.assertIsNone(payload["clis"][0]["coverage"]["mcp_tool_calls"])
+        self.assertIsNone(payload["clis"][0]["coverage"]["recorded_results"])
 
     def test_human_output_renders_unknown_usage_with_dash(self) -> None:
         report = Report(
@@ -864,6 +868,14 @@ class CliTests(unittest.TestCase):
             sessions_with_project=2,
             sessions_unattributed=0,
             sessions_matching_project=0,
+            recorded_results=RecordedResultsCoverage(
+                paired=2,
+                partial=1,
+                unsupported=1,
+                unmeasurable=1,
+                unpaired_results=1,
+                unpaired_calls=1,
+            ),
         )
         rows = [
             ServerRow(
@@ -883,6 +895,17 @@ class CliTests(unittest.TestCase):
                 usage_status="measured",
                 called_tools={},
                 verdict="prune",
+                recorded_result_footprint=RecordedResultFootprint(
+                    results=2,
+                    lower_bound=True,
+                    basis="recorded_utf8_bytes",
+                    token_estimate="bytes/4",
+                    total_bytes=48,
+                    total_tokens=TokenCount(12, False),
+                    max_tokens=TokenCount(8, False),
+                    p50_tokens=TokenCount(4, False),
+                    p90_tokens=TokenCount(8, False),
+                ),
             ),
             ServerRow(
                 server="beta",
@@ -958,6 +981,13 @@ class CliTests(unittest.TestCase):
             sidechain_counts={},
             server_tool_counts={},
             unattributed_mcp_calls=0,
+            server_result_bytes={"alpha": [16, 32]},
+            results_paired=2,
+            results_partial=1,
+            results_unsupported=1,
+            results_unmeasurable=1,
+            results_unpaired=1,
+            results_unpaired_calls=1,
         )
 
     def _coverage(self) -> Coverage:

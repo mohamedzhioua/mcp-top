@@ -370,6 +370,9 @@ def _row_json(row: ServerRow) -> dict:
         "called_tools": row.called_tools,
         "verdict": row.verdict,
         "filtered_tools": row.filtered_tools,
+        "recorded_result_footprint": _footprint_json(
+            row.recorded_result_footprint
+        ),
     }
 
 
@@ -377,6 +380,22 @@ def _token_json(tokens: TokenCount | None) -> dict | None:
     if tokens is None:
         return None
     return {"value": tokens.tokens, "exact": tokens.exact}
+
+
+def _footprint_json(footprint: object) -> dict | None:
+    if footprint is None:
+        return None
+    return {
+        "results": footprint.results,
+        "lower_bound": footprint.lower_bound,
+        "basis": footprint.basis,
+        "token_estimate": footprint.token_estimate,
+        "total_bytes": footprint.total_bytes,
+        "total_tokens": _token_json(footprint.total_tokens),
+        "max_tokens": _token_json(footprint.max_tokens),
+        "p50_tokens": _token_json(footprint.p50_tokens),
+        "p90_tokens": _token_json(footprint.p90_tokens),
+    }
 
 
 def _render_human(report: Report, include_prune: bool = False) -> str:
@@ -451,6 +470,18 @@ def _render_cli_human(cli_report: CliReport, include_header: bool) -> str:
                 f"  {row.server}: definitions unavailable -- "
                 f"{row.def_error or 'unknown error'}"
             )
+    for row in cli_report.rows:
+        if row.recorded_result_footprint is None:
+            continue
+        footprint = row.recorded_result_footprint
+        table_lines.append(
+            f"  {_ascii(row.server)} recorded result footprint: "
+            f"{footprint.total_bytes} recorded UTF-8 byte(s) (lower bound) -> "
+            f"{fmt(footprint.total_tokens)} tok (estimate) across "
+            f"{footprint.results} result(s) "
+            f"(max {fmt(footprint.max_tokens)}, "
+            f"p90 {fmt(footprint.p90_tokens)})"
+        )
 
     breakdown = []
     for row in cli_report.rows:

@@ -27,6 +27,13 @@ class UsageWindow:
     server_calls_by_project: dict[str, dict[str, int]] = field(
         default_factory=dict
     )
+    server_result_bytes: dict[str, list[int]] = field(default_factory=dict)
+    results_paired: int = 0
+    results_partial: int = 0
+    results_unsupported: int = 0
+    results_unmeasurable: int = 0
+    results_unpaired: int = 0
+    results_unpaired_calls: int = 0
 
 
 def count_calls(
@@ -90,6 +97,13 @@ def count_calls(
     server_tool_counts: dict[str, dict[str, int]] = {}
     server_calls_by_project: dict[str, dict[str, int]] = {}
     unattributed_mcp_calls = 0
+    server_result_bytes: dict[str, list[int]] = {}
+    results_paired = 0
+    results_partial = 0
+    results_unsupported = 0
+    results_unmeasurable = 0
+    results_unpaired = 0
+    results_unpaired_calls = 0
     sessions_with_project = 0
     sessions_unattributed = 0
     for _, files, group_project in home_included:
@@ -114,7 +128,16 @@ def count_calls(
 
     for _, files, _ in verdict_groups:
         for _, session in files:
+            results_unpaired += session.unpaired_results
             for call in session.tool_calls:
+                if call.result_kind == "paired":
+                    results_paired += 1
+                elif call.result_kind == "partial":
+                    results_partial += 1
+                elif call.result_kind == "unsupported":
+                    results_unsupported += 1
+                elif call.result_kind == "unmeasurable":
+                    results_unmeasurable += 1
                 counts[call.raw] = counts.get(call.raw, 0) + 1
                 if call.sidechain:
                     sidechain_counts[call.raw] = (
@@ -131,6 +154,15 @@ def count_calls(
                     called_tools[call.tool] = (
                         called_tools.get(call.tool, 0) + 1
                     )
+                    if (
+                        call.result_kind in {"paired", "partial"}
+                        and call.result_bytes is not None
+                    ):
+                        server_result_bytes.setdefault(
+                            call.server, []
+                        ).append(call.result_bytes)
+                    if call.result_kind is None:
+                        results_unpaired_calls += 1
                 elif call.kind == "mcp-unattributed":
                     unattributed_mcp_calls += 1
 
@@ -148,6 +180,13 @@ def count_calls(
         sessions_unattributed=sessions_unattributed,
         sessions_matching_project=len(project_included),
         server_calls_by_project=server_calls_by_project,
+        server_result_bytes=server_result_bytes,
+        results_paired=results_paired,
+        results_partial=results_partial,
+        results_unsupported=results_unsupported,
+        results_unmeasurable=results_unmeasurable,
+        results_unpaired=results_unpaired,
+        results_unpaired_calls=results_unpaired_calls,
     )
 
 

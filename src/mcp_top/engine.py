@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 from mcp_top.config import ServerConfig
@@ -27,6 +28,25 @@ _CLAUDE_TEXT_LIMIT_BYTES = 2 * 1024
 
 
 @dataclass
+class RecordedResultFootprint:
+    """Lower-bound stats for recorded result bytes.
+
+    Percentiles use the nearest-rank method over per-result token estimates:
+    sort values ascending and take ceil(k / 100 * n), using one-based ranks.
+    """
+
+    results: int
+    lower_bound: bool
+    basis: str
+    token_estimate: str
+    total_bytes: int
+    total_tokens: TokenCount
+    max_tokens: TokenCount
+    p50_tokens: TokenCount
+    p90_tokens: TokenCount
+
+
+@dataclass
 class ServerRow:
     server: str
     scope: str
@@ -43,6 +63,7 @@ class ServerRow:
     called_tools: dict[str, int]
     verdict: str
     filtered_tools: int = 0
+    recorded_result_footprint: RecordedResultFootprint | None = None
 
 
 @dataclass
@@ -169,6 +190,9 @@ def build_cli_report(
                 called_tools=called_tools,
                 verdict=_verdict(calls, result.status, usage_status),
                 filtered_tools=result.filtered_tools,
+                recorded_result_footprint=_recorded_result_footprint(
+                    window, server.name
+                ),
             )
         )
 
@@ -194,6 +218,9 @@ def build_cli_report(
                     called_tools=called_tools,
                     verdict=_verdict(calls, "unsupported", "measured"),
                     filtered_tools=0,
+                    recorded_result_footprint=_recorded_result_footprint(
+                        window, server_name
+                    ),
                 )
             )
 
@@ -485,6 +512,37 @@ def _sum_token_counts(estimates: list[TokenCount]) -> TokenCount:
         tokens=sum(estimate.tokens for estimate in estimates),
         exact=all(estimate.exact for estimate in estimates),
     )
+
+
+def _recorded_result_footprint(
+    window: UsageWindow | None, server: str
+) -> RecordedResultFootprint | None:
+    if window is None:
+        return None
+    byte_counts = window.server_result_bytes.get(server, [])
+    if not byte_counts:
+        return None
+    token_values = sorted(_estimate_recorded_bytes(value).tokens for value in byte_counts)
+    return RecordedResultFootprint(
+        results=len(byte_counts),
+        lower_bound=True,
+        basis="recorded_utf8_bytes",
+        token_estimate="bytes/4",
+        total_bytes=sum(byte_counts),
+        total_tokens=_estimate_recorded_bytes(sum(byte_counts)),
+        max_tokens=TokenCount(tokens=max(token_values), exact=False),
+        p50_tokens=TokenCount(tokens=_nearest_rank(token_values, 50), exact=False),
+        p90_tokens=TokenCount(tokens=_nearest_rank(token_values, 90), exact=False),
+    )
+
+
+def _estimate_recorded_bytes(byte_count: int) -> TokenCount:
+    return TokenCount(tokens=math.ceil(byte_count / 4), exact=False)
+
+
+def _nearest_rank(sorted_values: list[int], percentile: int) -> int:
+    rank = math.ceil(percentile / 100 * len(sorted_values))
+    return sorted_values[max(rank - 1, 0)]
 
 
 def _enforce_token_range(
