@@ -25,6 +25,7 @@ def parse_session(
 ) -> SessionResult:
     """Parse one Claude Code transcript, skipping unsafe or damaged formats."""
 
+    project = _project_slug_from_path(path)
     read_result = read_jsonl_records(path)
     if read_result.error is not None:
         return SessionResult(
@@ -36,6 +37,7 @@ def parse_session(
             tool_calls=[],
             first_ts=None,
             last_ts=None,
+            project=project,
         )
     records = read_result.records
     non_empty_lines = read_result.non_empty_lines
@@ -109,6 +111,7 @@ def parse_session(
             last_ts=last_ts,
             bad_lines=bad_lines,
             duplicate_tool_use=duplicate_tool_use,
+            project=project,
         )
     for version in versions_seen:
         if re.match(SUPPORTED_VERSION_PATTERN, version) is None:
@@ -123,6 +126,7 @@ def parse_session(
                 last_ts=last_ts,
                 bad_lines=bad_lines,
                 duplicate_tool_use=duplicate_tool_use,
+                project=project,
             )
 
     if not versions_seen:
@@ -137,6 +141,7 @@ def parse_session(
             last_ts=last_ts,
             bad_lines=bad_lines,
             duplicate_tool_use=duplicate_tool_use,
+            project=project,
         )
 
     if non_empty_lines and bad_lines / non_empty_lines > 0.1:
@@ -151,6 +156,7 @@ def parse_session(
             last_ts=last_ts,
             bad_lines=bad_lines,
             duplicate_tool_use=duplicate_tool_use,
+            project=project,
         )
 
     return SessionResult(
@@ -164,6 +170,7 @@ def parse_session(
         last_ts=last_ts,
         bad_lines=bad_lines,
         duplicate_tool_use=duplicate_tool_use,
+        project=project,
     )
 
 
@@ -208,6 +215,17 @@ def find_transcripts(home: str) -> list[str]:
 
     pattern = os.path.join(home, ".claude", "projects", "*", "**", "*.jsonl")
     return sorted(glob.glob(pattern, recursive=True))
+
+
+def _project_slug_from_path(path: str) -> str | None:
+    normalized = os.path.normpath(path).replace("\\", "/")
+    parts = normalized.split("/")
+    compare_parts = [part.casefold() for part in parts] if os.name == "nt" else parts
+    for index in range(len(compare_parts) - 2):
+        if compare_parts[index] == ".claude" and compare_parts[index + 1] == "projects":
+            slug = parts[index + 2]
+            return slug or None
+    return None
 
 
 def session_key(path: str, home: str) -> str:

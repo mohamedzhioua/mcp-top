@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-import os
 import json
+import os
+import shutil
 import tempfile
 import unittest
 
@@ -56,6 +57,25 @@ class ClaudeCodeAdapterTests(unittest.TestCase):
         self.assertIsNone(bash_call.tool)
         self.assertEqual(result.first_ts, "2026-06-10T10:00:00.000Z")
         self.assertEqual(result.last_ts, "2026-06-10T10:04:00.000Z")
+
+    def test_project_slug_is_parsed_from_transcript_path(self) -> None:
+        slug = "C--Users-User-Desktop-proj"
+        with tempfile.TemporaryDirectory() as temporary:
+            path = os.path.join(
+                temporary,
+                ".claude",
+                "projects",
+                slug,
+                "11111111-1111-1111-1111-111111111111.jsonl",
+            )
+            os.makedirs(os.path.dirname(path))
+            shutil.copyfile(os.path.join(FIXTURES, "good_session.jsonl"), path)
+
+            result = parse_session(path)
+
+        self.assertEqual(result.status, "parsed")
+        self.assertEqual(result.project, slug)
+        self.assertIsNone(result.raw_cwd)
 
     def test_second_supported_version_is_parsed(self) -> None:
         path = os.path.join(FIXTURES, "good_session_2.jsonl")

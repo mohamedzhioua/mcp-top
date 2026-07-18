@@ -34,6 +34,8 @@ class SessionResult:
     last_ts: str | None
     bad_lines: int = 0
     duplicate_tool_use: int = 0
+    project: str | None = None
+    raw_cwd: str | None = None
 
 
 @dataclass

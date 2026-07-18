@@ -10,6 +10,7 @@ import unittest
 import _path  # noqa: F401
 
 from mcp_top.adapters.codex import find_transcripts, parse_session, session_key
+from mcp_top.projects import normalize_project_key
 
 
 FIXTURES = os.path.join(os.path.dirname(__file__), "fixtures", "codex_sessions")
@@ -28,6 +29,8 @@ class CodexAdapterTests(unittest.TestCase):
         self.assertEqual(result.session_id, "codex-session-1")
         self.assertEqual(result.versions_seen, ["0.144.1"])
         self.assertEqual(result.duplicate_tool_use, 1)
+        self.assertEqual(result.raw_cwd, "/tmp/project")
+        self.assertEqual(result.project, normalize_project_key("/tmp/project"))
         self.assertEqual(result.first_ts, "2026-06-10T10:00:00Z")
         self.assertEqual(result.last_ts, "2026-06-10T10:06:00Z")
         self.assertEqual(

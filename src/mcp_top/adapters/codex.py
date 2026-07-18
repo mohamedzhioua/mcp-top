@@ -6,6 +6,7 @@ import glob
 import os
 from typing import Any, Collection
 
+from mcp_top.projects import normalize_project_key
 from mcp_top.transcripts import (
     SessionResult,
     ToolCall,
@@ -58,6 +59,8 @@ def parse_session(
     versions_seen: list[str] = []
     saw_session_meta = False
     session_id: str | None = None
+    raw_cwd: str | None = None
+    project: str | None = None
     tool_calls: list[ToolCall] = []
     seen_call_ids: set[str] = set()
     duplicate_tool_use = 0
@@ -83,6 +86,10 @@ def parse_session(
             record_session_id = payload.get("id")
             if session_id is None and isinstance(record_session_id, str):
                 session_id = record_session_id
+            cwd = payload.get("cwd")
+            if raw_cwd is None and isinstance(cwd, str) and cwd != "":
+                raw_cwd = cwd
+                project = normalize_project_key(cwd)
             continue
 
         if record.get("type") != "response_item":
@@ -125,6 +132,8 @@ def parse_session(
             last_ts=last_ts,
             bad_lines=read_result.bad_lines,
             duplicate_tool_use=duplicate_tool_use,
+            project=project,
+            raw_cwd=raw_cwd,
         )
 
     if (
@@ -145,6 +154,8 @@ def parse_session(
             last_ts=last_ts,
             bad_lines=read_result.bad_lines,
             duplicate_tool_use=duplicate_tool_use,
+            project=project,
+            raw_cwd=raw_cwd,
         )
 
     return SessionResult(
@@ -158,6 +169,8 @@ def parse_session(
         last_ts=last_ts,
         bad_lines=read_result.bad_lines,
         duplicate_tool_use=duplicate_tool_use,
+        project=project,
+        raw_cwd=raw_cwd,
     )
 
 
