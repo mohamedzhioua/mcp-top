@@ -6,9 +6,13 @@ import glob
 import os
 from typing import Any, Collection
 
+from mcp_top.projects import normalize_project_key
 from mcp_top.transcripts import (
+    RecordedResult,
     SessionResult,
     ToolCall,
+    measured_utf8_bytes,
+    pair_results,
     parse_timestamp,
     read_jsonl_records,
 )
@@ -58,7 +62,12 @@ def parse_session(
     versions_seen: list[str] = []
     saw_session_meta = False
     session_id: str | None = None
+    raw_cwd: str | None = None
+    project: str | None = None
     tool_calls: list[ToolCall] = []
+    calls_by_id: dict[str, ToolCall] = {}
+    collision_ids: set[str] = set()
+    results: list[RecordedResult] = []
     seen_call_ids: set[str] = set()
     duplicate_tool_use = 0
 
@@ -83,9 +92,29 @@ def parse_session(
             record_session_id = payload.get("id")
             if session_id is None and isinstance(record_session_id, str):
                 session_id = record_session_id
+            cwd = payload.get("cwd")
+            if raw_cwd is None and isinstance(cwd, str) and cwd != "":
+                raw_cwd = cwd
+                project = normalize_project_key(cwd)
             continue
 
         if record.get("type") != "response_item":
+            continue
+        if payload.get("type") == "function_call_output":
+            call_id = payload.get("call_id")
+            output = payload.get("output")
+            paired_id = call_id if isinstance(call_id, str) else None
+            if isinstance(output, str):
+                byte_count, measured = measured_utf8_bytes(output)
+                results.append(
+                    RecordedResult(
+                        paired_id,
+                        byte_count,
+                        "paired" if measured else "unmeasurable",
+                    )
+                )
+            else:
+                results.append(RecordedResult(paired_id, 0, "unsupported"))
             continue
         if payload.get("type") not in {"function_call", "custom_tool_call"}:
             continue
@@ -93,6 +122,7 @@ def parse_session(
         call_id = payload.get("call_id")
         if isinstance(call_id, str):
             if call_id in seen_call_ids:
+                collision_ids.add(call_id)
                 duplicate_tool_use += 1
                 continue
 
@@ -102,13 +132,16 @@ def parse_session(
         if isinstance(call_id, str):
             seen_call_ids.add(call_id)
         namespace = payload.get("namespace")
-        tool_calls.append(
-            _tool_call(
-                name,
-                namespace if isinstance(namespace, str) else None,
-                timestamp if isinstance(timestamp, str) else "",
-            )
+        call = _tool_call(
+            name,
+            namespace if isinstance(namespace, str) else None,
+            timestamp if isinstance(timestamp, str) else "",
         )
+        tool_calls.append(call)
+        if isinstance(call_id, str):
+            calls_by_id[call_id] = call
+
+    result_pairing = pair_results(calls_by_id, collision_ids, results)
 
     first_ts = min(timestamps, default=(None, None), key=lambda item: item[0])[1]
     last_ts = max(timestamps, default=(None, None), key=lambda item: item[0])[1]
@@ -125,6 +158,8 @@ def parse_session(
             last_ts=last_ts,
             bad_lines=read_result.bad_lines,
             duplicate_tool_use=duplicate_tool_use,
+            project=project,
+            raw_cwd=raw_cwd,
         )
 
     if (
@@ -145,6 +180,8 @@ def parse_session(
             last_ts=last_ts,
             bad_lines=read_result.bad_lines,
             duplicate_tool_use=duplicate_tool_use,
+            project=project,
+            raw_cwd=raw_cwd,
         )
 
     return SessionResult(
@@ -158,6 +195,11 @@ def parse_session(
         last_ts=last_ts,
         bad_lines=read_result.bad_lines,
         duplicate_tool_use=duplicate_tool_use,
+        project=project,
+        raw_cwd=raw_cwd,
+        unpaired_results=result_pairing.unpaired_results,
+        unsupported_results=result_pairing.unsupported_results,
+        unmeasurable_results=result_pairing.unmeasurable_results,
     )
 
 
@@ -204,4 +246,5 @@ def _tool_call(raw: str, namespace: str | None, timestamp: str) -> ToolCall:
         timestamp=timestamp,
         sidechain=False,
     )
+
 

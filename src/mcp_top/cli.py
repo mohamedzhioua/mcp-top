@@ -9,6 +9,7 @@ import re
 import shlex
 import sys
 from dataclasses import asdict
+from datetime import datetime, timezone
 
 from mcp_top import __version__
 from mcp_top.adapters import claude_code, codex as codex_adapter
@@ -26,6 +27,15 @@ from mcp_top.engine import (
     build_report,
 )
 from mcp_top.mcpclient import ServerTools, list_server_tools
+from mcp_top.projects import claude_project_slug, normalize_project_key
+from mcp_top.snapshot import (
+    SnapshotLoadError,
+    build_snapshot,
+    diff_snapshots,
+    load_snapshot_file,
+    render_diff_human,
+    snapshot_to_dict,
+)
 from mcp_top.tokens import TokenCount, fmt
 
 
@@ -35,6 +45,11 @@ CLIS = {
         "find_transcripts": claude_code.find_transcripts,
         "parse_session": claude_code.parse_session,
         "session_key": claude_code.session_key,
+        # Claude transcripts expose only a lossy directory slug, so project
+        # matching is best-effort lexical matching rather than path identity.
+        "project_key": lambda project: claude_project_slug(
+            os.path.normpath(os.path.abspath(project))
+        ),
         "detected": lambda home, project: (
             os.path.exists(os.path.join(home, ".claude.json"))
             or os.path.exists(os.path.join(home, ".claude", "projects"))
@@ -49,6 +64,9 @@ CLIS = {
         "find_transcripts": codex_adapter.find_transcripts,
         "parse_session": codex_adapter.parse_session,
         "session_key": codex_adapter.session_key,
+        "project_key": lambda project: normalize_project_key(
+            os.path.abspath(project)
+        ),
         "detected": lambda home, project: (
             os.path.exists(os.path.join(home, ".codex", "config.toml"))
             or os.path.exists(os.path.join(home, ".codex", "sessions"))
@@ -65,6 +83,7 @@ CLIS = {
         "find_transcripts": None,
         "parse_session": None,
         "session_key": None,
+        "project_key": lambda project: None,
         "usage_note": (
             "Cursor stores chats in undocumented SQLite; no transcript "
             "adapter -- usage unknown"
@@ -95,7 +114,40 @@ def main(argv: list[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
     try:
+        if args.command == "diff":
+            old_snapshot = load_snapshot_file(args.old)
+            new_snapshot = load_snapshot_file(args.new)
+            diff = diff_snapshots(old_snapshot, new_snapshot)
+            if args.json:
+                print(json.dumps(diff, sort_keys=True))
+            else:
+                print(render_diff_human(diff))
+            return 0
         report = _build(args)
+        if args.command == "snapshot":
+            snapshot = build_snapshot(
+                report,
+                datetime.now(timezone.utc),
+                default_sessions=args.sessions,
+                default_days=args.days,
+                redact_identifiers=args.redact_identifiers,
+            )
+            rendered = json.dumps(snapshot_to_dict(snapshot), sort_keys=True)
+            if args.out is None:
+                print(rendered)
+            else:
+                try:
+                    with open(args.out, "w", encoding="utf-8") as handle:
+                        handle.write(rendered)
+                        handle.write("\n")
+                except OSError as err:
+                    print(
+                        "mcp-top snapshot: cannot write output: "
+                        f"{err.strerror or err}",
+                        file=sys.stderr,
+                    )
+                    return 2
+            return 0
         if args.json:
             print(
                 json.dumps(
@@ -106,35 +158,101 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print(_render_human(report, include_prune=args.prune))
         return 0
+    except SnapshotLoadError as err:
+        print(f"mcp-top diff: {err}", file=sys.stderr)
+        return 2
     except Exception as err:
         print(f"mcp-top: internal error: {err}", file=sys.stderr)
         return 2
 
 
 def _parser() -> argparse.ArgumentParser:
+    common = argparse.ArgumentParser(add_help=False)
+    _add_common_arguments(common, default_values=True)
+    subcommand_common = argparse.ArgumentParser(add_help=False)
+    _add_common_arguments(subcommand_common, default_values=False)
     parser = argparse.ArgumentParser(
         prog="mcp-top",
         description="Rank configured MCP servers by definition cost and recent usage.",
+        parents=[common],
     )
-    parser.add_argument("--home", default=os.path.expanduser("~"))
-    parser.add_argument("--project", default=os.getcwd())
-    parser.add_argument("--sessions", type=_positive_int, default=30)
-    parser.add_argument("--days", type=_positive_int, default=30)
-    parser.add_argument("--timeout", type=_positive_float, default=20.0)
+    parser.add_argument(
+        "--version", action="version", version=f"%(prog)s {__version__}"
+    )
+    subparsers = parser.add_subparsers(dest="command")
+    snapshot = subparsers.add_parser(
+        "snapshot",
+        parents=[subcommand_common],
+        help="emit a redacted aggregate snapshot",
+    )
+    snapshot.add_argument(
+        "--out",
+        metavar="FILE",
+        help=(
+            "write the snapshot to FILE instead of stdout; overwrites FILE "
+            "if it exists"
+        ),
+    )
+    snapshot.add_argument(
+        "--redact-identifiers",
+        action="store_true",
+        help="pseudonymize server and called-tool names in the snapshot",
+    )
+    diff = subparsers.add_parser(
+        "diff",
+        parents=[subcommand_common],
+        help="compare two redacted aggregate snapshots",
+    )
+    diff.add_argument("old")
+    diff.add_argument("new")
+    return parser
+
+
+def _add_common_arguments(
+    parser: argparse.ArgumentParser,
+    *,
+    default_values: bool,
+) -> None:
+    default = None if default_values else argparse.SUPPRESS
+    parser.add_argument(
+        "--home",
+        default=os.path.expanduser("~") if default_values else default,
+    )
+    parser.add_argument(
+        "--project",
+        default=os.getcwd() if default_values else default,
+    )
+    parser.add_argument(
+        "--sessions",
+        type=_positive_int,
+        default=30 if default_values else default,
+    )
+    parser.add_argument(
+        "--days",
+        type=_positive_int,
+        default=30 if default_values else default,
+    )
+    parser.add_argument(
+        "--timeout",
+        type=_positive_float,
+        default=20.0 if default_values else default,
+    )
     parser.add_argument(
         "--cli",
         choices=[*CLIS.keys(), "all"],
-        default="all",
+        default="all" if default_values else default,
         help="CLI transcript/config source to inspect",
     )
     parser.add_argument(
         "--no-query",
         action="store_true",
+        default=False if default_values else default,
         help="do not launch configured MCP servers",
     )
     parser.add_argument(
         "--query-project",
         action="store_true",
+        default=False if default_values else default,
         help=(
             "also launch project-scope MCP servers (Claude project "
             ".mcp.json, Cursor project .cursor/mcp.json); off by default "
@@ -143,19 +261,32 @@ def _parser() -> argparse.ArgumentParser:
             "workspace trust -- pass this only in trusted repos"
         ),
     )
-    parser.add_argument("--json", action="store_true", help="emit JSON")
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        default=False if default_values else default,
+        help="emit JSON",
+    )
+    parser.add_argument(
+        "--project-usage",
+        action="store_true",
+        default=False if default_values else default,
+        help=(
+            "restrict usage counts to the current --project (default counts "
+            "usage across all projects); Codex uses the recorded cwd exactly, "
+            "while Claude attribution is best-effort slug-based; uncertain or "
+            "absent attribution is reported, not guessed."
+        ),
+    )
     parser.add_argument(
         "--prune",
         action="store_true",
+        default=False if default_values else default,
         help=(
             "append suggested removals and review candidates; never applied "
             "(mcp-top is read-only)"
         ),
     )
-    parser.add_argument(
-        "--version", action="version", version=f"%(prog)s {__version__}"
-    )
-    return parser
 
 
 def _build(args: argparse.Namespace) -> Report:
@@ -183,6 +314,7 @@ def _build(args: argparse.Namespace) -> Report:
         find_transcripts_func = entry["find_transcripts"]
         parse_session_func = entry["parse_session"]
         session_key_func = entry["session_key"]
+        project_key_func = entry.get("project_key")
         if (
             find_transcripts_func is None
             or parse_session_func is None
@@ -196,11 +328,17 @@ def _build(args: argparse.Namespace) -> Report:
             sessions = [
                 parse_session_func(path, configured) for path in paths
             ]
+            project_filter = (
+                project_key_func(args.project)
+                if args.project_usage and project_key_func is not None
+                else None
+            )
             window = count_calls(
                 sessions,
                 [session_key_func(path, args.home) for path in paths],
                 window_sessions=args.sessions,
                 window_days=args.days,
+                project_filter=project_filter,
             )
         inputs.append(
             CliReportInput(
@@ -343,6 +481,9 @@ def _row_json(row: ServerRow) -> dict:
         "called_tools": row.called_tools,
         "verdict": row.verdict,
         "filtered_tools": row.filtered_tools,
+        "recorded_result_footprint": _footprint_json(
+            row.recorded_result_footprint
+        ),
     }
 
 
@@ -350,6 +491,22 @@ def _token_json(tokens: TokenCount | None) -> dict | None:
     if tokens is None:
         return None
     return {"value": tokens.tokens, "exact": tokens.exact}
+
+
+def _footprint_json(footprint: object) -> dict | None:
+    if footprint is None:
+        return None
+    return {
+        "results": footprint.results,
+        "lower_bound": footprint.lower_bound,
+        "basis": footprint.basis,
+        "token_estimate": footprint.token_estimate,
+        "total_bytes": footprint.total_bytes,
+        "total_tokens": _token_json(footprint.total_tokens),
+        "max_tokens": _token_json(footprint.max_tokens),
+        "p50_tokens": _token_json(footprint.p50_tokens),
+        "p90_tokens": _token_json(footprint.p90_tokens),
+    }
 
 
 def _render_human(report: Report, include_prune: bool = False) -> str:
@@ -424,6 +581,18 @@ def _render_cli_human(cli_report: CliReport, include_header: bool) -> str:
                 f"  {row.server}: definitions unavailable -- "
                 f"{row.def_error or 'unknown error'}"
             )
+    for row in cli_report.rows:
+        if row.recorded_result_footprint is None:
+            continue
+        footprint = row.recorded_result_footprint
+        table_lines.append(
+            f"  {_ascii(row.server)} recorded result footprint: "
+            f"{footprint.total_bytes} recorded UTF-8 byte(s) (lower bound) -> "
+            f"{fmt(footprint.total_tokens)} tok (estimate) across "
+            f"{footprint.results} result(s) "
+            f"(max {fmt(footprint.max_tokens)}, "
+            f"p90 {fmt(footprint.p90_tokens)})"
+        )
 
     breakdown = []
     for row in cli_report.rows:
@@ -449,8 +618,8 @@ def _render_prune_block(report: Report) -> str:
 
     Never applied. Suggestions and candidates carry an advertised-maximum and
     upfront-floor removal range; candidates also explain why their actual
-    saving is unknown. CLIs with no usage adapter are reported explicitly
-    rather than shown as an empty set.
+    removal impact is unknown. CLIs with no usage adapter are reported
+    explicitly rather than shown as an empty set.
     """
 
     lines = [
@@ -489,7 +658,8 @@ def _render_prune_block(report: Report) -> str:
 
     lines.append("")
     lines.append(
-        "Prune candidates -- review before removing (actual saving unknown):"
+        "Prune candidates -- review before removing "
+        "(actual removal impact unknown):"
     )
     candidates = [
         (cli.cli, item)
@@ -509,7 +679,7 @@ def _render_prune_block(report: Report) -> str:
             f"  - [{cli_name}] {_ascii(item.server)} ({item.scope}) in "
             f"{_ascii(item.source_path)} -> "
             f"{removal_range}, "
-            "actual saving unknown"
+            "actual removal impact unknown"
         )
         for reason in item.reasons:
             lines.append(f"      * {_ascii(reason)}")

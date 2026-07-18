@@ -4,7 +4,50 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog.
 
-## 0.4.0 — 2026-07-18
+## 0.5.0 - 2026-07-18
+
+### Added
+
+- Added `--project-usage` for opt-in project-scoped usage windows. The default
+  remains home-wide.
+- Added recorded-result footprint as a lower-bound measurement of recorded
+  UTF-8 result bytes, including taxonomy and basis fields for paired, partial,
+  unsupported, unmeasurable, unpaired-result, and unpaired-call cases.
+- Added `snapshot` and `diff` subcommands with schemas `mcp-top-snapshot/v1`
+  and `mcp-top-diff/v1`, plus `snapshot --redact-identifiers`.
+- Added Claude loading-regime evidence for the Vertex default-off signal and
+  `ENABLE_TOOL_SEARCH=auto` / `auto:N` threshold mode.
+- Added a reproducible before/after prune case study under
+  `docs/examples/prune-case-study.md` with a runnable script in
+  `scripts/examples/prune_case_study.py`.
+
+### Changed
+
+- Kept JSON report schema `mcp-top/v3` and added fields without a breaking
+  schema change: coverage attribution, `coverage.recorded_results`, and
+  per-server `recorded_result_footprint`.
+- Made prune reasons attribution-aware, including empty in-project windows,
+  unattributed sessions, and home-wide versus project-scoped usage.
+- Resolved Claude loading regimes through a documented precedence ladder
+  instead of broad inference.
+- Updated README and package metadata for the v0.5 launch.
+
+### Fixed
+
+- Fixed `ENABLE_TOOL_SEARCH` so it overrides a non-first-party
+  `ANTHROPIC_BASE_URL`; v0.4 could misclassify that combination as unknown.
+- Fixed option handling before subcommands so flags such as `--no-query` are
+  honored when placed before `snapshot` or `diff`.
+
+### Security
+
+- Snapshots are allowlist-built and never carry config secrets, config paths,
+  result content, raw command arguments, env values, URLs, errors, regime
+  evidence, or prune recipes.
+- The diff loader strictly validates untrusted snapshot files and reports
+  value-free errors without replaying hostile embedded values.
+
+## 0.4.0 - 2026-07-18
 
 ### Changed
 
@@ -27,7 +70,7 @@ The format is based on Keep a Changelog.
 | `gross_tokens` | Replace with `removes_advertised_max_tokens`. Removal impact is now expressed as the advertised maximum removed, not a fixed gross saving. |
 | `net_tokens` | Replace with `removes_upfront_floor_tokens`. Net per-run savings are no longer asserted; v3 reports the upfront floor removed and keeps candidate actual savings unknown when precedence or attribution makes the result ambiguous. |
 | (none in v2) | Added `recipe` object to each `suggested_removals` entry: `{kind, source_path, scope, change}`, plus `argv` when `kind` is `"command"`. There is no v2 equivalent to migrate from. |
-| Type change | Every v2 integer-or-`null` token field (`def_tokens`, `gross_tokens`, `net_tokens`) is replaced by a v3 token object `{"value": <int>, "exact": <bool>}` or `null` -- not a bare integer. Callers must read `.value`, not compare the field directly. |
+| Type change | Every v2 integer-or-`null` token field (`def_tokens`, `gross_tokens`, `net_tokens`) is replaced by a v3 token object `{"value": <int>, "exact": <bool>}` or `null` - not a bare integer. Callers must read `.value`, not compare the field directly. |
 
 ### Added
 
@@ -48,8 +91,7 @@ The format is based on Keep a Changelog.
   and a green test run before build/publish.
 - Added Claude Code 2KB truncation modeling for tool descriptions and server
   instructions before token estimation.
-- Added `--query-project` to opt into launching project-scope MCP servers
-  (see Security below).
+- Added `--query-project` to opt into launching project-scope MCP servers.
 
 ### Security
 
@@ -79,7 +121,7 @@ The format is based on Keep a Changelog.
   definition estimator sum (as originally specified) plus instructions, and
   `upfront_floor_tokens` always uses the client-visible `mcp__<server>__<tool>`
   name for Claude Code. Zero tools with instructions no longer attributes any
-  cost to "advertised tool definitions".
+  weight to "advertised tool definitions".
 - Fixed the emitted Codex remediation command: mcp-top no longer generates an
   executable TOML-editing command for Codex (it could corrupt multiline
   strings/comments); Codex clean suggestions now get the same structured,
@@ -99,7 +141,7 @@ The format is based on Keep a Changelog.
   `suggestion`s are limited to global (user-scope) servers whose deletion
   reactivates nothing (estimated net saving = measured definition cost).
   Everything else that scores `prune` becomes a review `candidate` with an
-  explicitly unknown net saving -- project scope (usage is not attributed per
+  explicitly unknown net saving - project scope (usage is not attributed per
   project), a deletion that would reactivate a lower-precedence entry, or an
   unparsed config layer, or (for Codex) a same-name project-layer entry that a
   trusted project could redefine. `--json --prune` adds an additive

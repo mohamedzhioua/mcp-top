@@ -5,4 +5,5 @@
 {"timestamp":"2026-06-10T10:04:00Z","type":"response_item","payload":{"type":"function_call","name":"shell_command","call_id":"call_3","arguments":"{}"}}
 {"timestamp":"2026-06-10T10:05:00Z","type":"response_item","payload":{"type":"function_call","name":"mystery","call_id":"call_4","arguments":"{}","namespace":"mcp__"}}
 {"timestamp":"2026-06-10T10:06:00Z","type":"response_item","payload":{"type":"function_call","name":"spawn_agent","call_id":"call_5","arguments":"{}","namespace":"collaboration"}}
-
+{"timestamp":"2026-06-10T10:06:10Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_1","output":"codex-output"}}
+{"timestamp":"2026-06-10T10:06:20Z","type":"response_item","payload":{"type":"function_call_output","call_id":"missing","output":"orphan"}}

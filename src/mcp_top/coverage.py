@@ -11,6 +11,18 @@ from mcp_top.transcripts import SessionResult
 
 
 @dataclass
+class RecordedResultsCoverage:
+    """Result classification counts for a measured transcript window."""
+
+    paired: int = 0
+    partial: int = 0
+    unsupported: int = 0
+    unmeasurable: int = 0
+    unpaired_results: int = 0
+    unpaired_calls: int = 0
+
+
+@dataclass
 class Coverage:
     """What mcp-top could and could not inspect for this report."""
 
@@ -33,6 +45,11 @@ class Coverage:
     unmatched_enabled_tools: list[tuple[str, list[str]]] = field(
         default_factory=list
     )
+    project_filter_active: bool = False
+    sessions_with_project: int = 0
+    sessions_unattributed: int = 0
+    sessions_matching_project: int = 0
+    recorded_results: RecordedResultsCoverage | None = None
 
 
 def build_coverage(
@@ -59,6 +76,11 @@ def build_coverage(
     unattributed_mcp_calls = 0
     in_window: int | None = None
     future_sessions = 0
+    project_filter_active = False
+    sessions_with_project = 0
+    sessions_unattributed = 0
+    sessions_matching_project = 0
+    recorded_results = None
     if window is None:
         usage_note = usage_note or "no transcript adapter for this CLI"
     else:
@@ -71,6 +93,18 @@ def build_coverage(
         unattributed_mcp_calls = window.unattributed_mcp_calls
         in_window = window.sessions_considered
         future_sessions = window.future_sessions
+        project_filter_active = window.project_filter is not None
+        sessions_with_project = window.sessions_with_project
+        sessions_unattributed = window.sessions_unattributed
+        sessions_matching_project = window.sessions_matching_project
+        recorded_results = RecordedResultsCoverage(
+            paired=window.results_paired,
+            partial=window.results_partial,
+            unsupported=window.results_unsupported,
+            unmeasurable=window.results_unmeasurable,
+            unpaired_results=window.results_unpaired,
+            unpaired_calls=window.results_unpaired_calls,
+        )
         if window.sessions_considered == 0:
             if not sessions:
                 usage_note = usage_note or "no transcripts found -- usage unknown"
@@ -119,6 +153,11 @@ def build_coverage(
             for result in server_tools_list
             if result.status == "ok" and result.unmatched_enabled_tools
         ],
+        project_filter_active=project_filter_active,
+        sessions_with_project=sessions_with_project,
+        sessions_unattributed=sessions_unattributed,
+        sessions_matching_project=sessions_matching_project,
+        recorded_results=recorded_results,
     )
 
 
@@ -168,6 +207,31 @@ def render_coverage_text(cov: Coverage) -> str:
         lines.append(
             f"  {cov.unattributed_mcp_calls} MCP-prefixed call(s) could not "
             "be attributed to a server"
+        )
+    if cov.recorded_results is not None and any(
+        (
+            cov.recorded_results.paired,
+            cov.recorded_results.partial,
+            cov.recorded_results.unsupported,
+            cov.recorded_results.unmeasurable,
+            cov.recorded_results.unpaired_results,
+            cov.recorded_results.unpaired_calls,
+        )
+    ):
+        lines.append(
+            f"  recorded results: {cov.recorded_results.paired} paired, "
+            f"{cov.recorded_results.partial} partial, "
+            f"{cov.recorded_results.unsupported} unsupported, "
+            f"{cov.recorded_results.unmeasurable} unmeasurable, "
+            f"{cov.recorded_results.unpaired_results} unpaired result(s), "
+            f"{cov.recorded_results.unpaired_calls} unpaired call(s) "
+            "(recorded result footprint is a recorded-bytes lower bound)"
+        )
+    if cov.project_filter_active:
+        lines.append(
+            "  usage scoped to the current project: "
+            f"{cov.sessions_matching_project} in-project session(s), "
+            f"{cov.sessions_unattributed} unattributed session(s) excluded"
         )
     if cov.usage_note is not None:
         lines.append(f"  usage: {cov.usage_note}")

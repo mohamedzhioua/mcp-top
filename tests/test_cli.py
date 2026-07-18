@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import contextlib
+import copy
+from datetime import datetime, timezone
 import io
 import json
 import os
@@ -15,9 +17,10 @@ from unittest import mock
 import _path  # noqa: F401
 
 from mcp_top import cli
-from mcp_top.coverage import Coverage
+from mcp_top.coverage import Coverage, RecordedResultsCoverage
 from mcp_top.counter import UsageWindow
 from mcp_top.engine import CliReport, PruneSuggestion, Report, ServerRow
+from mcp_top.engine import RecordedResultFootprint
 from mcp_top.tokens import TokenCount
 
 
@@ -89,6 +92,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(server["usage_status"], "measured")
         self.assertEqual(server["verdict"], "review")
         self.assertEqual(server["filtered_tools"], 0)
+        self.assertIsNotNone(server["recorded_result_footprint"])
 
     def test_human_output_starts_with_coverage_then_table(self) -> None:
         exit_code, output = self._run()
@@ -118,6 +122,201 @@ class CliTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertEqual(output.getvalue(), self._read_golden("cli_json_v3.json"))
 
+    def test_snapshot_subcommand_emits_redacted_snapshot_to_stdout(self) -> None:
+        output = io.StringIO()
+        with mock.patch.object(cli, "_build", return_value=self._golden_report()):
+            with mock.patch.object(cli, "datetime") as fake_datetime:
+                fake_datetime.now.return_value = datetime(
+                    2026, 7, 18, 12, 0, tzinfo=timezone.utc
+                )
+                with contextlib.redirect_stdout(output):
+                    exit_code = cli.main(["snapshot"])
+
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["schema"], "mcp-top-snapshot/v1")
+        self.assertEqual(payload["generated_at"], "2026-07-18T12:00:00+00:00")
+        server = payload["clis"][0]["servers"][0]
+        self.assertEqual(server["server"], "alpha")
+        self.assertIn("called_tools", server)
+        self.assertNotIn("regime_evidence", server)
+        self.assertNotIn("def_error", server)
+        self.assertNotIn("/home/test", output.getvalue())
+
+    def test_snapshot_subcommand_writes_named_output_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            output_path = os.path.join(tempdir, "snapshot.json")
+            stdout = io.StringIO()
+            with mock.patch.object(cli, "_build", return_value=self._golden_report()):
+                with contextlib.redirect_stdout(stdout):
+                    exit_code = cli.main(["snapshot", "--out", output_path])
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(stdout.getvalue(), "")
+            with open(output_path, "r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+            self.assertEqual(payload["schema"], "mcp-top-snapshot/v1")
+
+    def test_snapshot_out_write_error_returns_2_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with mock.patch.object(cli, "_build", return_value=self._golden_report()):
+                with contextlib.redirect_stdout(stdout):
+                    with contextlib.redirect_stderr(stderr):
+                        exit_code = cli.main(["snapshot", "--out", tempdir])
+
+        self.assertEqual(exit_code, 2)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertIn(
+            "mcp-top snapshot: cannot write output:",
+            stderr.getvalue(),
+        )
+        self.assertNotIn("Traceback", stderr.getvalue())
+
+    def test_common_options_before_snapshot_survive_subparser(self) -> None:
+        cases = [
+            (["--no-query"], "no_query", True),
+            (["--home", self.home], "home", self.home),
+            (["--project", self.project], "project", self.project),
+            (["--cli", "codex"], "cli", "codex"),
+            (["--sessions", "7"], "sessions", 7),
+            (["--days", "11"], "days", 11),
+            (["--timeout", "1.25"], "timeout", 1.25),
+            (["--query-project"], "query_project", True),
+            (["--project-usage"], "project_usage", True),
+            (["--json"], "json", True),
+            (["--prune"], "prune", True),
+        ]
+
+        for option, attr, expected in cases:
+            with self.subTest(option=option):
+                before = cli._parser().parse_args([*option, "snapshot"])
+                after = cli._parser().parse_args(["snapshot", *option])
+                self.assertEqual(getattr(before, attr), expected)
+                self.assertEqual(getattr(after, attr), expected)
+
+    def test_json_before_diff_survives_subparser(self) -> None:
+        before = cli._parser().parse_args(["--json", "diff", "old", "new"])
+        after = cli._parser().parse_args(["diff", "old", "new", "--json"])
+
+        self.assertTrue(before.json)
+        self.assertTrue(after.json)
+
+    def test_diff_subcommand_compares_written_snapshots(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            old_path = os.path.join(tempdir, "old.json")
+            new_path = os.path.join(tempdir, "new.json")
+            self._write_snapshot(old_path, "alpha", calls=1)
+            self._write_snapshot(new_path, "alpha", calls=3)
+
+            human = io.StringIO()
+            with contextlib.redirect_stdout(human):
+                human_exit = cli.main(["diff", old_path, new_path])
+            json_output = io.StringIO()
+            with contextlib.redirect_stdout(json_output):
+                json_exit = cli.main(["diff", old_path, new_path, "--json"])
+
+        self.assertEqual(human_exit, 0)
+        self.assertIn("calls: 1 -> 3 (+2)", human.getvalue())
+        self.assertEqual(json_exit, 0)
+        payload = json.loads(json_output.getvalue())
+        self.assertEqual(payload["schema"], "mcp-top-diff/v1")
+        changed = payload["clis"][0]["changed"][0]
+        self.assertEqual(changed["calls"]["delta"], 2)
+
+    def test_diff_rejects_crafted_token_without_replaying_embedded_string(self) -> None:
+        secret = "sk_live_DO_NOT_REPLAY"
+        with tempfile.TemporaryDirectory() as tempdir:
+            crafted = os.path.join(tempdir, "crafted.json")
+            valid = os.path.join(tempdir, "valid.json")
+            payload = self._snapshot_payload("alpha", calls=1)
+            payload["clis"][0]["servers"][0]["advertised_max_tokens"][
+                "source_path"
+            ] = secret
+            with open(crafted, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle)
+            self._write_snapshot(valid, "alpha", calls=1)
+
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                with contextlib.redirect_stderr(stderr):
+                    exit_code = cli.main(["diff", crafted, valid])
+
+        self.assertEqual(exit_code, 2)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertIn("mcp-top diff:", stderr.getvalue())
+        self.assertNotIn(secret, stderr.getvalue())
+        self.assertNotIn("Traceback", stderr.getvalue())
+
+    def test_diff_rejects_invalid_snapshots_cleanly(self) -> None:
+        cases = [
+            ("clis null", lambda payload: payload.__setitem__("clis", None)),
+            ("missing clis", lambda payload: payload.pop("clis")),
+            (
+                "wrong type",
+                lambda payload: payload["clis"][0]["window"].__setitem__(
+                    "days", "30"
+                ),
+            ),
+            (
+                "duplicate server",
+                lambda payload: payload["clis"][0]["servers"].append(
+                    copy.deepcopy(payload["clis"][0]["servers"][0])
+                ),
+            ),
+            (
+                "negative count",
+                lambda payload: payload["clis"][0]["servers"][0].__setitem__(
+                    "calls", -1
+                ),
+            ),
+            (
+                "bool as int",
+                lambda payload: payload["clis"][0]["servers"][0].__setitem__(
+                    "calls", True
+                ),
+            ),
+        ]
+        with tempfile.TemporaryDirectory() as tempdir:
+            valid = os.path.join(tempdir, "valid.json")
+            self._write_snapshot(valid, "alpha", calls=1)
+            for name, mutate in cases:
+                with self.subTest(name=name):
+                    bad = os.path.join(tempdir, f"{name}.json")
+                    payload = self._snapshot_payload("alpha", calls=1)
+                    mutate(payload)
+                    with open(bad, "w", encoding="utf-8") as handle:
+                        json.dump(payload, handle)
+                    stdout = io.StringIO()
+                    stderr = io.StringIO()
+                    with contextlib.redirect_stdout(stdout):
+                        with contextlib.redirect_stderr(stderr):
+                            exit_code = cli.main(["diff", bad, valid])
+
+                    self.assertEqual(exit_code, 2)
+                    self.assertEqual(stdout.getvalue(), "")
+                    self.assertIn("mcp-top diff:", stderr.getvalue())
+                    self.assertNotIn("Traceback", stderr.getvalue())
+
+    def test_diff_bad_input_returns_2_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            wrong = os.path.join(tempdir, "wrong.json")
+            with open(wrong, "w", encoding="utf-8") as handle:
+                json.dump({"schema": "wrong"}, handle)
+            valid = os.path.join(tempdir, "valid.json")
+            self._write_snapshot(valid, "alpha", calls=1)
+
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                exit_code = cli.main(["diff", wrong, valid])
+
+        self.assertEqual(exit_code, 2)
+        self.assertIn("mcp-top diff:", stderr.getvalue())
+        self.assertIn("schema must be mcp-top-snapshot/v1", stderr.getvalue())
+        self.assertNotIn("Traceback", stderr.getvalue())
+
     def test_no_query_is_unsupported_but_successful(self) -> None:
         exit_code, output = self._run("--json", "--no-query")
 
@@ -132,6 +331,84 @@ class CliTests(unittest.TestCase):
         self.assertEqual(server["def_error"], "skipped by --no-query")
         self.assertIsNone(server["advertised_max_tokens"])
         self.assertIsNone(server["upfront_floor_tokens"])
+
+    def test_project_usage_scopes_calls_to_current_project(self) -> None:
+        projects_dir = os.path.join(self.home, ".claude", "projects")
+        shutil.rmtree(projects_dir)
+        current_slug = cli.claude_project_slug(
+            os.path.normpath(os.path.abspath(self.project))
+        )
+        current_dir = os.path.join(projects_dir, current_slug)
+        other_dir = os.path.join(projects_dir, "other-project")
+        os.makedirs(current_dir)
+        os.makedirs(other_dir)
+        self._write_claude_session(
+            os.path.join(current_dir, "current.jsonl"),
+            calls=1,
+            timestamp="2026-06-15T12:00:00Z",
+        )
+        self._write_claude_session(
+            os.path.join(other_dir, "other.jsonl"),
+            calls=4,
+            timestamp="2026-06-14T12:00:00Z",
+        )
+
+        _, default_output = self._run("--json")
+        _, scoped_output = self._run("--json", "--project-usage")
+
+        default_row = json.loads(default_output)["clis"][0]["servers"][0]
+        scoped_payload = json.loads(scoped_output)
+        scoped_cli = scoped_payload["clis"][0]
+        scoped_row = scoped_cli["servers"][0]
+        self.assertEqual(default_row["server"], "github")
+        self.assertEqual(default_row["calls"], 5)
+        self.assertEqual(default_row["verdict"], "keep")
+        self.assertEqual(scoped_row["server"], "github")
+        self.assertEqual(scoped_row["calls"], 1)
+        self.assertEqual(scoped_row["verdict"], "review")
+        self.assertTrue(scoped_cli["coverage"]["project_filter_active"])
+        self.assertEqual(scoped_cli["coverage"]["sessions_with_project"], 2)
+        self.assertEqual(scoped_cli["coverage"]["sessions_unattributed"], 0)
+        self.assertEqual(scoped_cli["coverage"]["sessions_matching_project"], 1)
+        self.assertNotIn("project_filter", scoped_cli["coverage"])
+        self.assertNotIn(current_slug, scoped_output)
+
+    def test_project_usage_without_matching_sessions_is_unknown_without_prune(self) -> None:
+        projects_dir = os.path.join(self.home, ".claude", "projects")
+        shutil.rmtree(projects_dir)
+        other_dir = os.path.join(projects_dir, "other-project")
+        os.makedirs(other_dir)
+        self._write_claude_session(
+            os.path.join(other_dir, "other.jsonl"),
+            calls=1,
+            timestamp="2026-06-15T12:00:00Z",
+        )
+        current_slug = cli.claude_project_slug(
+            os.path.normpath(os.path.abspath(self.project))
+        )
+
+        exit_code, output = self._run(
+            "--json",
+            "--prune",
+            "--project-usage",
+            "--sessions",
+            "1",
+        )
+
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(output)
+        cli_payload = payload["clis"][0]
+        row = next(
+            row for row in cli_payload["servers"] if row["server"] == "github"
+        )
+        self.assertIsNone(row["calls"])
+        self.assertEqual(row["usage_status"], "no-data")
+        self.assertEqual(row["verdict"], "unknown")
+        self.assertEqual(cli_payload["suggested_removals"], [])
+        self.assertTrue(cli_payload["coverage"]["project_filter_active"])
+        self.assertEqual(cli_payload["coverage"]["sessions_matching_project"], 0)
+        self.assertNotIn("project_filter", cli_payload["coverage"])
+        self.assertNotIn(current_slug, output)
 
     def test_json_emits_nullable_calls_and_usage_status(self) -> None:
         report = Report(
@@ -181,9 +458,11 @@ class CliTests(unittest.TestCase):
         self.assertIsNone(server["calls"])
         self.assertEqual(server["usage_status"], "unsupported")
         self.assertEqual(server["verdict"], "unknown")
+        self.assertIsNone(server["recorded_result_footprint"])
         self.assertIsNone(payload["clis"][0]["coverage"]["in_window"])
         self.assertIsNone(payload["clis"][0]["coverage"]["total_tool_calls"])
         self.assertIsNone(payload["clis"][0]["coverage"]["mcp_tool_calls"])
+        self.assertIsNone(payload["clis"][0]["coverage"]["recorded_results"])
 
     def test_human_output_renders_unknown_usage_with_dash(self) -> None:
         report = Report(
@@ -442,7 +721,7 @@ class CliTests(unittest.TestCase):
         # The table verdict must not assert a savings number for a candidate.
         self.assertIn("prune candidate", output)
         self.assertNotIn("prune -> save", output)
-        self.assertIn("actual saving unknown", output)
+        self.assertIn("actual removal impact unknown", output)
         self.assertIn("edit:", output)
 
     def test_invalid_env_secret_appears_in_no_output_mode(self) -> None:
@@ -690,6 +969,31 @@ class CliTests(unittest.TestCase):
             ) as handle:
                 json.dump({"mcpServers": project_servers}, handle)
 
+    def _write_claude_session(
+        self, path: str, *, calls: int, timestamp: str
+    ) -> None:
+        with open(path, "w", encoding="utf-8") as handle:
+            for index in range(calls):
+                json.dump(
+                    {
+                        "version": "2.1.211",
+                        "sessionId": os.path.basename(path),
+                        "timestamp": timestamp,
+                        "type": "assistant",
+                        "message": {
+                            "content": [
+                                {
+                                    "type": "tool_use",
+                                    "id": f"call-{index}",
+                                    "name": "mcp__github__first_tool",
+                                }
+                            ]
+                        },
+                    },
+                    handle,
+                )
+                handle.write("\n")
+
     def _run(self, *extra: str) -> tuple[int, str]:
         return self._run_with_home_project(self.home, self.project, *extra)
 
@@ -757,6 +1061,18 @@ class CliTests(unittest.TestCase):
             servers_queried_ok=2,
             servers_query_failed=[],
             config_warnings=[],
+            project_filter_active=False,
+            sessions_with_project=2,
+            sessions_unattributed=0,
+            sessions_matching_project=0,
+            recorded_results=RecordedResultsCoverage(
+                paired=2,
+                partial=1,
+                unsupported=1,
+                unmeasurable=1,
+                unpaired_results=1,
+                unpaired_calls=1,
+            ),
         )
         rows = [
             ServerRow(
@@ -776,6 +1092,17 @@ class CliTests(unittest.TestCase):
                 usage_status="measured",
                 called_tools={},
                 verdict="prune",
+                recorded_result_footprint=RecordedResultFootprint(
+                    results=2,
+                    lower_bound=True,
+                    basis="recorded_utf8_bytes",
+                    token_estimate="bytes/4",
+                    total_bytes=48,
+                    total_tokens=TokenCount(12, False),
+                    max_tokens=TokenCount(8, False),
+                    p50_tokens=TokenCount(4, False),
+                    p90_tokens=TokenCount(8, False),
+                ),
             ),
             ServerRow(
                 server="beta",
@@ -816,7 +1143,11 @@ class CliTests(unittest.TestCase):
                 removes_advertised_max_tokens=TokenCount(12, False),
                 removes_upfront_floor_tokens=TokenCount(12, False),
                 reactivates=None,
-                reasons=["usage is not attributed per-project; verify before removing"],
+                reasons=[
+                    "usage is counted across all projects (home-wide), not "
+                    "per-project; pass --project-usage to scope counts to this "
+                    "project before removing"
+                ],
             ),
         ]
         return Report(
@@ -838,6 +1169,52 @@ class CliTests(unittest.TestCase):
         with open(os.path.join(GOLDENS, name), "r", encoding="utf-8") as handle:
             return handle.read()
 
+    def _snapshot_payload(self, server: str, calls: int) -> dict:
+        return {
+            "schema": "mcp-top-snapshot/v1",
+            "generated_at": "2026-07-18T12:00:00+00:00",
+            "identifiers_redacted": False,
+            "clis": [
+                {
+                    "cli": "claude-code",
+                    "window": {
+                        "sessions": 30,
+                        "days": 30,
+                        "sessions_considered": 1,
+                        "project_filter_active": False,
+                    },
+                    "recorded_results": None,
+                    "servers": [
+                        {
+                            "server": server,
+                            "scope": "user",
+                            "transport": "stdio",
+                            "loading_regime": "unknown",
+                            "advertised_max_tokens": {
+                                "value": 10,
+                                "exact": False,
+                            },
+                            "upfront_floor_tokens": {
+                                "value": 4,
+                                "exact": False,
+                            },
+                            "tool_count": 1,
+                            "calls": calls,
+                            "usage_status": "measured",
+                            "verdict": "review",
+                            "called_tools": {},
+                            "recorded_result_footprint": None,
+                        }
+                    ],
+                }
+            ],
+        }
+
+    def _write_snapshot(self, path: str, server: str, calls: int) -> None:
+        payload = self._snapshot_payload(server, calls)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle)
+
     def _usage_window(self, sessions_considered: int = 1) -> UsageWindow:
         return UsageWindow(
             sessions_considered=sessions_considered,
@@ -847,6 +1224,13 @@ class CliTests(unittest.TestCase):
             sidechain_counts={},
             server_tool_counts={},
             unattributed_mcp_calls=0,
+            server_result_bytes={"alpha": [16, 32]},
+            results_paired=2,
+            results_partial=1,
+            results_unsupported=1,
+            results_unmeasurable=1,
+            results_unpaired=1,
+            results_unpaired_calls=1,
         )
 
     def _coverage(self) -> Coverage:

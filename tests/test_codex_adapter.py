@@ -10,6 +10,7 @@ import unittest
 import _path  # noqa: F401
 
 from mcp_top.adapters.codex import find_transcripts, parse_session, session_key
+from mcp_top.projects import normalize_project_key
 
 
 FIXTURES = os.path.join(os.path.dirname(__file__), "fixtures", "codex_sessions")
@@ -28,8 +29,13 @@ class CodexAdapterTests(unittest.TestCase):
         self.assertEqual(result.session_id, "codex-session-1")
         self.assertEqual(result.versions_seen, ["0.144.1"])
         self.assertEqual(result.duplicate_tool_use, 1)
+        self.assertEqual(result.raw_cwd, "/tmp/project")
+        self.assertEqual(result.project, normalize_project_key("/tmp/project"))
         self.assertEqual(result.first_ts, "2026-06-10T10:00:00Z")
-        self.assertEqual(result.last_ts, "2026-06-10T10:06:00Z")
+        self.assertEqual(result.last_ts, "2026-06-10T10:06:20Z")
+        self.assertEqual(result.unpaired_results, 2)
+        self.assertEqual(result.unsupported_results, 0)
+        self.assertEqual(result.unmeasurable_results, 0)
         self.assertEqual(
             [call.raw for call in result.tool_calls],
             ["get_issue", "custom_builtin", "shell_command", "mystery", "spawn_agent"],
@@ -40,6 +46,8 @@ class CodexAdapterTests(unittest.TestCase):
         self.assertEqual(github.server, "github")
         self.assertEqual(github.tool, "get_issue")
         self.assertFalse(github.sidechain)
+        self.assertIsNone(github.result_bytes)
+        self.assertIsNone(github.result_kind)
 
         self.assertEqual(result.tool_calls[1].kind, "builtin")
         self.assertEqual(result.tool_calls[2].kind, "builtin")
@@ -129,6 +137,65 @@ class CodexAdapterTests(unittest.TestCase):
         self.assertEqual([call.raw for call in result.tool_calls], ["get_issue"])
         self.assertEqual(result.duplicate_tool_use, 0)
 
+    def test_result_shapes_use_final_taxonomy(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = self._write_records(
+                temporary,
+                [
+                    {
+                        "type": "session_meta",
+                        "timestamp": "2026-06-10T10:00:00Z",
+                        "payload": {"id": "session", "cli_version": "0.144.1"},
+                    },
+                    self._call("paired", "mcp__github", "paired"),
+                    self._call("unsupported", "mcp__github", "unsupported"),
+                    self._call("unmeasurable", "mcp__github", "unmeasurable"),
+                    self._call("unpaired-call", "mcp__github", "unpaired_call"),
+                    self._output("paired", "abc"),
+                    self._output("unsupported", {"opaque": True}),
+                    self._output("unmeasurable", "\ud800"),
+                    self._output("missing", "orphan"),
+                    self._output("paired", "second"),
+                ],
+            )
+
+            result = parse_session(path)
+
+        calls = {call.tool: call for call in result.tool_calls}
+        self.assertEqual(calls["paired"].result_bytes, 3)
+        self.assertEqual(calls["paired"].result_kind, "paired")
+        self.assertEqual(calls["unsupported"].result_bytes, 0)
+        self.assertEqual(calls["unsupported"].result_kind, "unsupported")
+        self.assertEqual(calls["unmeasurable"].result_bytes, 0)
+        self.assertEqual(calls["unmeasurable"].result_kind, "unmeasurable")
+        self.assertIsNone(calls["unpaired_call"].result_kind)
+        self.assertEqual(result.unpaired_results, 2)
+        self.assertEqual(result.unsupported_results, 1)
+        self.assertEqual(result.unmeasurable_results, 1)
+
+    def test_collision_call_id_makes_result_unpaired(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = self._write_records(
+                temporary,
+                [
+                    {
+                        "type": "session_meta",
+                        "timestamp": "2026-06-10T10:00:00Z",
+                        "payload": {"id": "session", "cli_version": "0.144.1"},
+                    },
+                    self._call("same", "mcp__github", "first"),
+                    self._call("same", "mcp__github", "second"),
+                    self._output("same", "ambiguous"),
+                ],
+            )
+
+            result = parse_session(path)
+
+        self.assertEqual(result.duplicate_tool_use, 1)
+        self.assertEqual([call.tool for call in result.tool_calls], ["first"])
+        self.assertIsNone(result.tool_calls[0].result_kind)
+        self.assertEqual(result.unpaired_results, 1)
+
     def test_mostly_unparseable_file_is_skipped(self) -> None:
         result = parse_session(
             os.path.join(
@@ -168,6 +235,29 @@ class CodexAdapterTests(unittest.TestCase):
             for record in records:
                 handle.write(json.dumps(record) + "\n")
         return path
+
+    def _call(self, call_id: str, namespace: str, name: str) -> dict:
+        return {
+            "type": "response_item",
+            "timestamp": "2026-06-10T10:01:00Z",
+            "payload": {
+                "type": "function_call",
+                "call_id": call_id,
+                "namespace": namespace,
+                "name": name,
+            },
+        }
+
+    def _output(self, call_id: str, output: object) -> dict:
+        return {
+            "type": "response_item",
+            "timestamp": "2026-06-10T10:02:00Z",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": call_id,
+                "output": output,
+            },
+        }
 
 
 if __name__ == "__main__":

@@ -1,18 +1,20 @@
 Coverage: 2 transcripts found, 2 parsed, 0 skipped; 2 in window; 4 tool calls (4 MCP); server queries: 2 ok, 0 failed, 0 not queried
+  recorded results: 2 paired, 1 partial, 1 unsupported, 1 unmeasurable, 1 unpaired result(s), 1 unpaired call(s) (recorded result footprint is a recorded-bytes lower bound)
 
 SERVER  SCOPE    TOOLS  TOKEN RANGE  REGIME    CALLS(window)  VERDICT
 ------  -------  -----  -----------  --------  -------------  -----------------------------------------------------------
 alpha   user     2      >=~8..~20    deferred  0              prune -> removes advertised up to ~20 / upfront at least ~8
 beta    project  1      ~12          upfront   0              prune candidate
+  alpha recorded result footprint: 48 recorded UTF-8 byte(s) (lower bound) -> ~12 tok (estimate) across 2 result(s) (max ~8, p90 ~8)
 
 Suggested removals (never applied; mcp-top is read-only -- edit configs yourself):
   - [claude-code] alpha (user) in /home/test/.claude.json -> removes advertised up to ~20 / upfront at least ~8
       command: claude mcp remove --scope user alpha
   (~ marks a chars/4 estimate, rough error +/-25%)
 
-Prune candidates -- review before removing (actual saving unknown):
-  - [claude-code] beta (project) in /repo/.mcp.json -> removes advertised up to ~12 / upfront at least ~12, actual saving unknown
-      * usage is not attributed per-project; verify before removing
+Prune candidates -- review before removing (actual removal impact unknown):
+  - [claude-code] beta (project) in /repo/.mcp.json -> removes advertised up to ~12 / upfront at least ~12, actual removal impact unknown
+      * usage is counted across all projects (home-wide), not per-project; pass --project-usage to scope counts to this project before removing
       edit: Review /repo/.mcp.json (project scope) before changing Claude Code MCP server 'beta'; candidates intentionally do not include removal commands.
 
 Definition token counts use the chars/4 heuristic; ~ means estimate.

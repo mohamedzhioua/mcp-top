@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-import os
 import json
+import os
+import shutil
 import tempfile
 import unittest
 
@@ -55,7 +56,38 @@ class ClaudeCodeAdapterTests(unittest.TestCase):
         self.assertIsNone(bash_call.server)
         self.assertIsNone(bash_call.tool)
         self.assertEqual(result.first_ts, "2026-06-10T10:00:00.000Z")
-        self.assertEqual(result.last_ts, "2026-06-10T10:04:00.000Z")
+        self.assertEqual(result.last_ts, "2026-06-10T10:04:10.000Z")
+        self.assertEqual(result.unpaired_results, 1)
+        self.assertEqual(result.unsupported_results, 0)
+        self.assertEqual(result.unmeasurable_results, 0)
+        self.assertEqual(github_call.result_bytes, 4)
+        self.assertEqual(github_call.result_kind, "paired")
+        self.assertEqual(result.tool_calls[1].result_bytes, 4)
+        self.assertEqual(result.tool_calls[1].result_kind, "paired")
+        self.assertEqual(result.tool_calls[2].result_bytes, len("inline text"))
+        self.assertEqual(result.tool_calls[2].result_kind, "partial")
+        weather_call = result.tool_calls[-1]
+        self.assertEqual(weather_call.result_bytes, len("ééabc".encode("utf-8")))
+        self.assertEqual(weather_call.result_kind, "paired")
+
+    def test_project_slug_is_parsed_from_transcript_path(self) -> None:
+        slug = "C--Users-User-Desktop-proj"
+        with tempfile.TemporaryDirectory() as temporary:
+            path = os.path.join(
+                temporary,
+                ".claude",
+                "projects",
+                slug,
+                "11111111-1111-1111-1111-111111111111.jsonl",
+            )
+            os.makedirs(os.path.dirname(path))
+            shutil.copyfile(os.path.join(FIXTURES, "good_session.jsonl"), path)
+
+            result = parse_session(path)
+
+        self.assertEqual(result.status, "parsed")
+        self.assertEqual(result.project, slug)
+        self.assertIsNone(result.raw_cwd)
 
     def test_second_supported_version_is_parsed(self) -> None:
         path = os.path.join(FIXTURES, "good_session_2.jsonl")
@@ -216,6 +248,133 @@ class ClaudeCodeAdapterTests(unittest.TestCase):
             ["First", "NoId", "NonStringId"],
         )
         self.assertEqual(result.duplicate_tool_use, 1)
+
+    def test_collision_tool_use_id_makes_result_unpaired(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            assistant = self._record("2.1.207")
+            assistant["type"] = "assistant"
+            assistant["message"] = {
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "same",
+                        "name": "mcp__github__get_pr",
+                    },
+                    {
+                        "type": "tool_use",
+                        "id": "same",
+                        "name": "mcp__github__other",
+                    },
+                ]
+            }
+            user = self._record("2.1.207", "2026-06-10T10:01:00Z")
+            user["message"] = {
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "same",
+                        "content": "retained",
+                    }
+                ]
+            }
+            path = self._write_records(temporary, "paired.jsonl", [assistant, user])
+
+            result = parse_session(path)
+
+        self.assertEqual(result.duplicate_tool_use, 1)
+        self.assertEqual([call.raw for call in result.tool_calls], ["mcp__github__get_pr"])
+        self.assertIsNone(result.tool_calls[0].result_bytes)
+        self.assertIsNone(result.tool_calls[0].result_kind)
+        self.assertEqual(result.unpaired_results, 1)
+
+    def test_result_shapes_use_final_taxonomy(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            assistant = self._record("2.1.207")
+            assistant["type"] = "assistant"
+            assistant["message"] = {
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "paired",
+                        "name": "mcp__github__paired",
+                    },
+                    {
+                        "type": "tool_use",
+                        "id": "partial",
+                        "name": "mcp__github__partial",
+                    },
+                    {
+                        "type": "tool_use",
+                        "id": "unsupported",
+                        "name": "mcp__github__unsupported",
+                    },
+                    {
+                        "type": "tool_use",
+                        "id": "unmeasurable",
+                        "name": "mcp__github__unmeasurable",
+                    },
+                    {
+                        "type": "tool_use",
+                        "id": "unpaired-call",
+                        "name": "mcp__github__unpaired_call",
+                    },
+                ]
+            }
+            user = self._record("2.1.207", "2026-06-10T10:01:00Z")
+            user["message"] = {
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "paired",
+                        "content": "abc",
+                    },
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "partial",
+                        "content": [
+                            {"type": "text", "text": "text"},
+                            {"type": "image", "source": {}},
+                        ],
+                    },
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "unsupported",
+                        "content": [{"type": "image", "source": {}}],
+                    },
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "unmeasurable",
+                        "content": "\ud800",
+                    },
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "missing",
+                        "content": "orphan",
+                    },
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "paired",
+                        "content": "second",
+                    },
+                ]
+            }
+            path = self._write_records(temporary, "taxonomy.jsonl", [assistant, user])
+
+            result = parse_session(path)
+
+        calls = {call.tool: call for call in result.tool_calls}
+        self.assertEqual(calls["paired"].result_bytes, 3)
+        self.assertEqual(calls["paired"].result_kind, "paired")
+        self.assertEqual(calls["partial"].result_bytes, 4)
+        self.assertEqual(calls["partial"].result_kind, "partial")
+        self.assertEqual(calls["unsupported"].result_bytes, 0)
+        self.assertEqual(calls["unsupported"].result_kind, "unsupported")
+        self.assertEqual(calls["unmeasurable"].result_bytes, 0)
+        self.assertEqual(calls["unmeasurable"].result_kind, "unmeasurable")
+        self.assertIsNone(calls["unpaired_call"].result_kind)
+        self.assertEqual(result.unpaired_results, 2)
+        self.assertEqual(result.unsupported_results, 1)
+        self.assertEqual(result.unmeasurable_results, 1)
 
     def test_mcp_prefixed_unparseable_call_is_unattributed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
