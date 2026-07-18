@@ -16,10 +16,13 @@ import _path  # noqa: F401
 
 from mcp_top import cli
 from mcp_top.coverage import Coverage
-from mcp_top.engine import CliReport, Report, ServerRow
+from mcp_top.counter import UsageWindow
+from mcp_top.engine import CliReport, PruneSuggestion, Report, ServerRow
+from mcp_top.tokens import TokenCount
 
 
 FIXTURES = os.path.join(os.path.dirname(__file__), "fixtures")
+GOLDENS = os.path.join(os.path.dirname(__file__), "goldens")
 FAKE_SERVER = os.path.join(FIXTURES, "fake_mcp_server.py")
 TRANSCRIPTS = os.path.join(FIXTURES, "transcripts")
 
@@ -62,7 +65,7 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         payload = json.loads(output)
-        self.assertEqual(payload["schema"], "mcp-top/v2")
+        self.assertEqual(payload["schema"], "mcp-top/v3")
         self.assertEqual(len(payload["clis"]), 1)
         cli_payload = payload["clis"][0]
         self.assertEqual(cli_payload["cli"], "claude-code")
@@ -76,8 +79,12 @@ class CliTests(unittest.TestCase):
         server = next(
             row for row in cli_payload["servers"] if row["server"] == "github"
         )
-        self.assertIsNotNone(server["def_tokens"])
-        self.assertFalse(server["def_tokens"]["exact"])
+        self.assertNotIn("def_tokens", server)
+        self.assertIsNotNone(server["advertised_max_tokens"])
+        self.assertFalse(server["advertised_max_tokens"]["exact"])
+        self.assertIsNotNone(server["upfront_floor_tokens"])
+        self.assertEqual(server["loading_regime"], "unknown")
+        self.assertEqual(server["regime_evidence"], [])
         self.assertEqual(server["calls"], 2)
         self.assertEqual(server["usage_status"], "measured")
         self.assertEqual(server["verdict"], "review")
@@ -89,8 +96,27 @@ class CliTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertTrue(output.startswith("Coverage:"))
         self.assertIn("SERVER", output)
-        self.assertIn("DEF TOKENS", output)
+        self.assertIn("TOKEN RANGE", output)
+        self.assertIn("REGIME", output)
         self.assertLess(output.index("Coverage:"), output.index("SERVER"))
+
+    def test_human_v04_full_output_matches_golden(self) -> None:
+        output = io.StringIO()
+        with mock.patch.object(cli, "_build", return_value=self._golden_report()):
+            with contextlib.redirect_stdout(output):
+                exit_code = cli.main(["--prune"])
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(output.getvalue(), self._read_golden("cli_human_v04.txt"))
+
+    def test_json_v3_full_output_matches_golden(self) -> None:
+        output = io.StringIO()
+        with mock.patch.object(cli, "_build", return_value=self._golden_report()):
+            with contextlib.redirect_stdout(output):
+                exit_code = cli.main(["--json", "--prune"])
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(output.getvalue(), self._read_golden("cli_json_v3.json"))
 
     def test_no_query_is_unsupported_but_successful(self) -> None:
         exit_code, output = self._run("--json", "--no-query")
@@ -104,7 +130,8 @@ class CliTests(unittest.TestCase):
         )
         self.assertEqual(server["def_status"], "unsupported")
         self.assertEqual(server["def_error"], "skipped by --no-query")
-        self.assertIsNone(server["def_tokens"])
+        self.assertIsNone(server["advertised_max_tokens"])
+        self.assertIsNone(server["upfront_floor_tokens"])
 
     def test_json_emits_nullable_calls_and_usage_status(self) -> None:
         report = Report(
@@ -116,7 +143,10 @@ class CliTests(unittest.TestCase):
                             server="alpha",
                             scope="user",
                             transport="stdio",
-                            def_tokens=None,
+                            advertised_max_tokens=None,
+                            upfront_floor_tokens=None,
+                            loading_regime="unknown",
+                            regime_evidence=[],
                             def_status="unsupported",
                             def_error="not implemented",
                             tool_count=None,
@@ -165,7 +195,10 @@ class CliTests(unittest.TestCase):
                             server="alpha",
                             scope="user",
                             transport="stdio",
-                            def_tokens=None,
+                            advertised_max_tokens=None,
+                            upfront_floor_tokens=None,
+                            loading_regime="unknown",
+                            regime_evidence=[],
                             def_status="unsupported",
                             def_error="not implemented",
                             tool_count=None,
@@ -339,12 +372,11 @@ class CliTests(unittest.TestCase):
 
         _, plain = self._run("--json")
         plain_cli = json.loads(plain)["clis"][0]
-        # Contract: suggested_removals is --prune-only; schema stays v2.
         self.assertNotIn("suggested_removals", plain_cli)
 
         _, pruned = self._run("--json", "--prune")
         payload = json.loads(pruned)
-        self.assertEqual(payload["schema"], "mcp-top/v2")
+        self.assertEqual(payload["schema"], "mcp-top/v3")
         cli_entry = payload["clis"][0]
         self.assertIn("suggested_removals", cli_entry)
         unused = next(
@@ -353,7 +385,8 @@ class CliTests(unittest.TestCase):
             if item["server"] == "unused"
         )
         self.assertEqual(unused["kind"], "suggestion")
-        self.assertEqual(unused["net_tokens"], unused["gross_tokens"]["value"])
+        self.assertGreater(unused["removes_advertised_max_tokens"]["value"], 0)
+        self.assertIsNotNone(unused["removes_upfront_floor_tokens"])
         self.assertIsNone(unused["reactivates"])
         # No env/args/command ever surface in a suggestion.
         self.assertEqual(
@@ -363,12 +396,23 @@ class CliTests(unittest.TestCase):
                 "server",
                 "scope",
                 "source_path",
-                "gross_tokens",
-                "net_tokens",
+                "removes_advertised_max_tokens",
+                "removes_upfront_floor_tokens",
                 "reactivates",
                 "reasons",
+                "recipe",
             },
         )
+        recipe = unused["recipe"]
+        self.assertEqual(recipe["kind"], "command")
+        self.assertEqual(
+            recipe["argv"],
+            ["claude", "mcp", "remove", "--scope", "user", "unused"],
+        )
+        self.assertEqual(
+            recipe["source_path"], os.path.join(self.home, ".claude.json")
+        )
+        self.assertEqual(recipe["scope"], "user")
         self.assertNotIn("do-not-leak", pruned)
 
     def test_prune_human_flags_reactivation_candidate(self) -> None:
@@ -387,7 +431,10 @@ class CliTests(unittest.TestCase):
             },
         )
 
-        _, output = self._run("--prune")
+        # Project-scope servers are inventory-only by default (F1); opt in
+        # with --query-project (a trusted repo) to exercise the reactivation
+        # simulation end to end.
+        _, output = self._run("--prune", "--query-project")
 
         self.assertIn("Prune candidates", output)
         self.assertIn("shared", output)
@@ -395,6 +442,158 @@ class CliTests(unittest.TestCase):
         # The table verdict must not assert a savings number for a candidate.
         self.assertIn("prune candidate", output)
         self.assertNotIn("prune -> save", output)
+        self.assertIn("actual saving unknown", output)
+        self.assertIn("edit:", output)
+
+    def test_invalid_env_secret_appears_in_no_output_mode(self) -> None:
+        sentinel = "sk_live_DO_NOT_LEAK"
+        settings_path = os.path.join(self.home, ".claude", "settings.json")
+        with open(settings_path, "w", encoding="utf-8") as handle:
+            json.dump(
+                {
+                    "env": {
+                        "ENABLE_TOOL_SEARCH": sentinel,
+                        "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": sentinel,
+                    }
+                },
+                handle,
+            )
+
+        outputs = []
+        for options in (
+            ("--no-query",),
+            ("--json", "--no-query"),
+            ("--prune", "--no-query"),
+            ("--json", "--prune", "--no-query"),
+        ):
+            exit_code, output = self._run(*options)
+            self.assertEqual(exit_code, 0)
+            outputs.append(output)
+
+        for output in outputs:
+            self.assertNotIn(sentinel, output)
+        json_payload = json.loads(outputs[1])
+        evidence = json_payload["clis"][0]["servers"][0]["regime_evidence"]
+        self.assertEqual(len(evidence), 2)
+        self.assertTrue(all(item.endswith("=unrecognized") for item in evidence))
+
+    def test_protocol_error_sentinel_appears_in_no_output_mode(self) -> None:
+        sentinel = "sk_live_DO_NOT_LEAK"
+        self._set_servers(
+            {
+                "bad": {
+                    "command": sys.executable,
+                    "args": [FAKE_SERVER, "serve-error", sentinel],
+                }
+            }
+        )
+
+        outputs = []
+        for options in (
+            (),
+            ("--json",),
+            ("--prune",),
+            ("--json", "--prune"),
+        ):
+            exit_code, output = self._run(*options)
+            self.assertEqual(exit_code, 0)
+            outputs.append(output)
+
+        for output in outputs:
+            self.assertNotIn(sentinel, output)
+            self.assertNotIn("boom", output)
+        self.assertIn("initialize failed (code -32000)", outputs[0])
+        json_payload = json.loads(outputs[1])
+        server = next(
+            row
+            for row in json_payload["clis"][0]["servers"]
+            if row["server"] == "bad"
+        )
+        self.assertEqual(server["def_status"], "error")
+        self.assertEqual(server["def_error"], "initialize failed (code -32000)")
+
+    def test_project_scope_server_is_not_queried_by_default(self) -> None:
+        with open(
+            os.path.join(self.project, ".mcp.json"), "w", encoding="utf-8"
+        ) as handle:
+            json.dump(
+                {
+                    "mcpServers": {
+                        "repo-server": {
+                            "command": sys.executable,
+                            "args": [FAKE_SERVER, "serve"],
+                        }
+                    }
+                },
+                handle,
+            )
+
+        exit_code, output = self._run("--json")
+
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(output)
+        row = next(
+            row
+            for row in payload["clis"][0]["servers"]
+            if row["server"] == "repo-server"
+        )
+        self.assertEqual(row["def_status"], "unsupported")
+        self.assertIn("project scope not queried by default", row["def_error"])
+        self.assertIn("--query-project", row["def_error"])
+        self.assertIsNone(row["advertised_max_tokens"])
+
+    def test_query_project_flag_launches_project_scope_server(self) -> None:
+        with open(
+            os.path.join(self.project, ".mcp.json"), "w", encoding="utf-8"
+        ) as handle:
+            json.dump(
+                {
+                    "mcpServers": {
+                        "repo-server": {
+                            "command": sys.executable,
+                            "args": [FAKE_SERVER, "serve"],
+                        }
+                    }
+                },
+                handle,
+            )
+
+        exit_code, output = self._run("--json", "--query-project")
+
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(output)
+        row = next(
+            row
+            for row in payload["clis"][0]["servers"]
+            if row["server"] == "repo-server"
+        )
+        self.assertEqual(row["def_status"], "ok")
+        self.assertIsNotNone(row["advertised_max_tokens"])
+
+    def test_reserved_server_name_is_never_queried(self) -> None:
+        self._set_servers(
+            {
+                "workspace": {
+                    "command": sys.executable,
+                    # An arg the fake server would hang forever on if ever
+                    # launched -- this must return instantly without a hang.
+                    "args": [FAKE_SERVER, "sleep", "unused.pid"],
+                }
+            }
+        )
+
+        exit_code, output = self._run("--json", "--timeout", "1")
+
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(output)
+        row = next(
+            row
+            for row in payload["clis"][0]["servers"]
+            if row["server"] == "workspace"
+        )
+        self.assertEqual(row["def_status"], "unsupported")
+        self.assertIn("reserved", row["def_error"])
+        self.assertIsNone(row["advertised_max_tokens"])
 
     def test_prune_reports_cursor_usage_unavailable(self) -> None:
         cursor_dir = os.path.join(self.home, ".cursor")
@@ -408,6 +607,77 @@ class CliTests(unittest.TestCase):
 
         self.assertIn("usage unavailable", output)
         self.assertIn("cursor", output)
+
+    def test_prune_human_shell_quotes_hostile_clean_command(self) -> None:
+        suggestion = self._suggestion("bad 'name; rm -rf /")
+        report = Report(
+            clis=[
+                CliReport(
+                    cli="claude-code",
+                    rows=[],
+                    window=self._usage_window(),
+                    coverage=self._coverage(),
+                    suggestions=[suggestion],
+                )
+            ],
+            generated_note="note",
+        )
+
+        rendered = cli._render_prune_block(report)
+
+        self.assertIn(
+            "claude mcp remove --scope user 'bad '\"'\"'name; rm -rf /'",
+            rendered,
+        )
+
+    def test_candidate_recipe_is_guidance_without_argv(self) -> None:
+        candidate = self._suggestion(
+            "needs-review",
+            kind="candidate",
+            reasons=["reactivates another scope"],
+        )
+
+        payload = cli._suggestion_json("claude-code", candidate)
+
+        self.assertEqual(payload["recipe"]["kind"], "guidance")
+        self.assertNotIn("argv", payload["recipe"])
+        self.assertIn("source_path", payload["recipe"])
+        self.assertIn("scope", payload["recipe"])
+
+    def test_codex_recipe_is_guidance_with_exact_toml_table(self) -> None:
+        # Codex never gets an executable command (F6): a text-manipulation
+        # edit of a live TOML file can corrupt multiline strings/comments.
+        suggestion = self._suggestion(
+            'space "quote"; semi',
+            source_path="/home/me/.codex/config.toml",
+        )
+
+        recipe = cli._remediation_recipe("codex", suggestion)
+
+        self.assertEqual(recipe["kind"], "guidance")
+        self.assertNotIn("argv", recipe)
+        self.assertEqual(recipe["source_path"], "/home/me/.codex/config.toml")
+        self.assertEqual(recipe["scope"], "user")
+        self.assertIn(
+            '[mcp_servers."space \\"quote\\"; semi"]', recipe["change"]
+        )
+        self.assertIn("enabled = false", recipe["change"])
+
+    def test_cursor_recipe_names_exact_mcp_json_for_guidance(self) -> None:
+        candidate = self._suggestion(
+            "cursor-docs",
+            kind="candidate",
+            source_path="/repo/.cursor/mcp.json",
+            scope="project",
+            reasons=["usage unavailable"],
+        )
+
+        recipe = cli._remediation_recipe("cursor", candidate)
+
+        self.assertEqual(recipe["kind"], "guidance")
+        self.assertNotIn("argv", recipe)
+        self.assertIn("/repo/.cursor/mcp.json", recipe["change"])
+        self.assertIn("project scope", recipe["change"])
 
     def _set_servers(self, servers: dict, project_servers: dict | None = None) -> None:
         with open(
@@ -455,6 +725,142 @@ class CliTests(unittest.TestCase):
                 os.path.join(source_dir, filename),
                 os.path.join(session_dir, filename),
             )
+
+    def _suggestion(
+        self,
+        server: str,
+        *,
+        kind: str = "suggestion",
+        source_path: str = "~/.claude.json",
+        scope: str = "user",
+        reasons: list[str] | None = None,
+    ) -> PruneSuggestion:
+        return PruneSuggestion(
+            kind=kind,
+            server=server,
+            scope=scope,
+            source_path=source_path,
+            removes_advertised_max_tokens=TokenCount(10, False),
+            removes_upfront_floor_tokens=TokenCount(5, False),
+            reactivates=None,
+            reasons=[] if reasons is None else reasons,
+        )
+
+    def _golden_report(self) -> Report:
+        coverage = Coverage(
+            transcripts_found=2,
+            transcripts_parsed=2,
+            transcripts_skipped=[],
+            in_window=2,
+            total_tool_calls=4,
+            mcp_tool_calls=4,
+            servers_queried_ok=2,
+            servers_query_failed=[],
+            config_warnings=[],
+        )
+        rows = [
+            ServerRow(
+                server="alpha",
+                scope="user",
+                transport="stdio",
+                advertised_max_tokens=TokenCount(20, False),
+                upfront_floor_tokens=TokenCount(8, False),
+                loading_regime="deferred",
+                regime_evidence=[
+                    "/home/test/.claude/settings.json:env.ENABLE_TOOL_SEARCH=true"
+                ],
+                def_status="ok",
+                def_error=None,
+                tool_count=2,
+                calls=0,
+                usage_status="measured",
+                called_tools={},
+                verdict="prune",
+            ),
+            ServerRow(
+                server="beta",
+                scope="project",
+                transport="http",
+                advertised_max_tokens=TokenCount(12, False),
+                upfront_floor_tokens=TokenCount(12, False),
+                loading_regime="upfront",
+                regime_evidence=[
+                    "/home/test/.claude/settings.json:env."
+                    "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=set"
+                ],
+                def_status="ok",
+                def_error=None,
+                tool_count=1,
+                calls=0,
+                usage_status="measured",
+                called_tools={},
+                verdict="prune",
+            ),
+        ]
+        suggestions = [
+            PruneSuggestion(
+                kind="suggestion",
+                server="alpha",
+                scope="user",
+                source_path="/home/test/.claude.json",
+                removes_advertised_max_tokens=TokenCount(20, False),
+                removes_upfront_floor_tokens=TokenCount(8, False),
+                reactivates=None,
+                reasons=[],
+            ),
+            PruneSuggestion(
+                kind="candidate",
+                server="beta",
+                scope="project",
+                source_path="/repo/.mcp.json",
+                removes_advertised_max_tokens=TokenCount(12, False),
+                removes_upfront_floor_tokens=TokenCount(12, False),
+                reactivates=None,
+                reasons=["usage is not attributed per-project; verify before removing"],
+            ),
+        ]
+        return Report(
+            clis=[
+                CliReport(
+                    cli="claude-code",
+                    rows=rows,
+                    window=self._usage_window(sessions_considered=2),
+                    coverage=coverage,
+                    suggestions=suggestions,
+                )
+            ],
+            generated_note=(
+                "Definition token counts use the chars/4 heuristic; ~ means estimate."
+            ),
+        )
+
+    def _read_golden(self, name: str) -> str:
+        with open(os.path.join(GOLDENS, name), "r", encoding="utf-8") as handle:
+            return handle.read()
+
+    def _usage_window(self, sessions_considered: int = 1) -> UsageWindow:
+        return UsageWindow(
+            sessions_considered=sessions_considered,
+            window_sessions=30,
+            window_days=30,
+            counts={},
+            sidechain_counts={},
+            server_tool_counts={},
+            unattributed_mcp_calls=0,
+        )
+
+    def _coverage(self) -> Coverage:
+        return Coverage(
+            transcripts_found=0,
+            transcripts_parsed=0,
+            transcripts_skipped=[],
+            in_window=None,
+            total_tool_calls=None,
+            mcp_tool_calls=None,
+            servers_queried_ok=0,
+            servers_query_failed=[],
+            config_warnings=[],
+        )
 
 
 if __name__ == "__main__":

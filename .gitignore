@@ -5,3 +5,6 @@ dist/
 build/
 *.egg-info/
 .pytest_cache/
+
+# AI Engineering OS evidence receipts (local only)
+.ai-os/

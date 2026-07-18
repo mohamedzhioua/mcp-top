@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import math
 import unittest
 
 import _path  # noqa: F401
 
 from mcp_top.config import ServerConfig
 from mcp_top.counter import UsageWindow, count_calls
-from mcp_top.engine import build_cli_report
+from mcp_top.engine import _enforce_token_range, build_cli_report
 from mcp_top.mcpclient import ServerTools
+from mcp_top.tokens import TokenCount
 from mcp_top.transcripts import SessionResult, ToolCall
 
 
@@ -71,7 +73,8 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(rows["beta_review"].verdict, "review")
         self.assertEqual(rows["gamma_keep"].verdict, "keep")
         self.assertEqual(rows["delta_error"].verdict, "review")
-        self.assertIsNone(rows["delta_error"].def_tokens)
+        self.assertIsNone(rows["delta_error"].advertised_max_tokens)
+        self.assertIsNone(rows["delta_error"].upfront_floor_tokens)
         self.assertEqual(rows["delta_error"].calls, 0)
         self.assertEqual(rows["delta_error"].usage_status, "measured")
         self.assertEqual(rows["rogue"].scope, "(not configured)")
@@ -101,6 +104,159 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(
             report.coverage.usage_note,
             "no transcript adapter for this CLI",
+        )
+
+    def test_deferred_range_has_literal_disjoint_component_totals(
+        self,
+    ) -> None:
+        server = self._server("alpha")
+        server.loading_regime = "deferred"
+        definitions = [self._mixed_tools("alpha")]
+
+        report = build_cli_report("claude-code", [server], definitions, [], None)
+
+        row = report.rows[0]
+        self.assertEqual(
+            row.advertised_max_tokens,
+            TokenCount(tokens=66, exact=False),
+        )
+        self.assertEqual(
+            row.upfront_floor_tokens,
+            TokenCount(tokens=46, exact=False),
+        )
+        self.assertEqual(row.loading_regime, "deferred")
+
+    def test_upfront_range_includes_instructions_before_collapsing(self) -> None:
+        server = self._server("alpha")
+        server.loading_regime = "upfront"
+
+        report = build_cli_report(
+            "claude-code",
+            [server],
+            [self._mixed_tools("alpha")],
+            [],
+            None,
+        )
+
+        row = report.rows[0]
+        expected = TokenCount(tokens=66, exact=False)
+        self.assertEqual(row.advertised_max_tokens, expected)
+        self.assertEqual(row.upfront_floor_tokens, expected)
+
+    def test_claude_caps_instructions_and_descriptions_at_2kib(self) -> None:
+        server = self._server("alpha")
+        server.loading_regime = "upfront"
+        definitions = [
+            ServerTools(
+                server="alpha",
+                status="ok",
+                error=None,
+                instructions="i" * 3000,
+                tools=[{"name": "a", "description": "d" * 3000}],
+            )
+        ]
+
+        report = build_cli_report("claude-code", [server], definitions, [], None)
+
+        row = report.rows[0]
+        self.assertEqual(
+            row.upfront_floor_tokens,
+            TokenCount(tokens=1035, exact=False),
+        )
+        self.assertEqual(
+            row.advertised_max_tokens,
+            TokenCount(tokens=1035, exact=False),
+        )
+
+    def test_prior_instruction_inversion_repro_obeys_range_invariant(self) -> None:
+        server = self._server("alpha")
+        server.loading_regime = "deferred"
+        definitions = [
+            ServerTools(
+                server="alpha",
+                status="ok",
+                error=None,
+                instructions="i" * 400,
+                tools=[{"name": "a"}],
+            )
+        ]
+
+        report = build_cli_report("claude-code", [server], definitions, [], None)
+
+        row = report.rows[0]
+        self.assertEqual(row.upfront_floor_tokens.tokens, 104)
+        self.assertEqual(row.advertised_max_tokens.tokens, 106)
+        self.assertLessEqual(
+            row.upfront_floor_tokens.tokens,
+            row.advertised_max_tokens.tokens,
+        )
+
+    def test_range_guard_rejects_an_inverted_interval(self) -> None:
+        with self.assertRaisesRegex(AssertionError, "floor exceeds"):
+            _enforce_token_range(
+                TokenCount(tokens=3, exact=False),
+                TokenCount(tokens=101, exact=False),
+            )
+
+    def test_empty_components_are_exact_zero(self) -> None:
+        server = self._server("alpha")
+        report = build_cli_report(
+            "claude-code",
+            [server],
+            [self._tools("alpha", 0)],
+            [],
+            None,
+        )
+
+        row = report.rows[0]
+        expected = TokenCount(tokens=0, exact=True)
+        self.assertEqual(row.advertised_max_tokens, expected)
+        self.assertEqual(row.upfront_floor_tokens, expected)
+
+    def test_zero_tools_with_instructions_excludes_phantom_tool_cost(
+        self,
+    ) -> None:
+        # Zero tools plus instructions must attribute the whole range to
+        # instructions alone -- never a nonzero "advertised tool" cost.
+        server = self._server("alpha")
+        definitions = [
+            ServerTools(
+                server="alpha",
+                status="ok",
+                error=None,
+                instructions="hello world",
+                tools=[],
+            )
+        ]
+
+        report = build_cli_report("claude-code", [server], definitions, [], None)
+
+        row = report.rows[0]
+        expected = TokenCount(tokens=3, exact=False)
+        self.assertEqual(row.tool_count, 0)
+        self.assertEqual(row.advertised_max_tokens, expected)
+        self.assertEqual(row.upfront_floor_tokens, expected)
+
+    def test_claude_floor_uses_canonical_client_visible_tool_name(self) -> None:
+        # A deferred tool's floor contribution must be the client-visible
+        # mcp__<server>__<tool> name Claude actually shows, not the raw name.
+        server = self._server("alpha")
+        server.loading_regime = "deferred"
+        definitions = [
+            ServerTools(
+                server="alpha",
+                status="ok",
+                error=None,
+                tools=[{"name": "a"}],
+            )
+        ]
+
+        report = build_cli_report("claude-code", [server], definitions, [], None)
+
+        row = report.rows[0]
+        self.assertEqual(
+            row.upfront_floor_tokens,
+            TokenCount(tokens=math.ceil(len("mcp__alpha__a") / 4), exact=False),
         )
 
     def test_empty_corpus_usage_is_no_data_not_prune(self) -> None:
@@ -201,6 +357,27 @@ class EngineTests(unittest.TestCase):
             ],
         )
 
+    def _mixed_tools(self, server: str) -> ServerTools:
+        return ServerTools(
+            server=server,
+            status="ok",
+            error=None,
+            instructions="Use alpha for repository search.",
+            tools=[
+                {
+                    "name": "search",
+                    "description": "Search repositories",
+                    "inputSchema": {"type": "object"},
+                },
+                {
+                    "name": "always",
+                    "description": "Always visible",
+                    "inputSchema": {"type": "object"},
+                    "_meta": {"anthropic/alwaysLoad": True},
+                },
+            ],
+        )
+
     def _empty_window_report(self, sessions: list[SessionResult]):
         window = count_calls(
             sessions,
@@ -245,8 +422,8 @@ class PruneClassificationTests(unittest.TestCase):
         suggestion = report.suggestions[0]
         self.assertEqual(suggestion.kind, "suggestion")
         self.assertEqual(suggestion.server, "serena")
-        self.assertEqual(suggestion.net_tokens, suggestion.gross_tokens)
-        self.assertGreater(suggestion.gross_tokens, 0)
+        self.assertGreater(suggestion.removes_advertised_max_tokens.tokens, 0)
+        self.assertIsNotNone(suggestion.removes_upfront_floor_tokens)
         self.assertIsNone(suggestion.reactivates)
         self.assertEqual(suggestion.reasons, [])
 
@@ -262,7 +439,7 @@ class PruneClassificationTests(unittest.TestCase):
         winner = self._cfg(
             "serena",
             scope="project",
-            precedence=2,
+            precedence=1,
             source_path="proj/.mcp.json",
             shadowed=(shadow,),
         )
@@ -272,8 +449,8 @@ class PruneClassificationTests(unittest.TestCase):
         self.assertEqual(len(report.suggestions), 1)
         candidate = report.suggestions[0]
         self.assertEqual(candidate.kind, "candidate")
-        self.assertIsNone(candidate.net_tokens)
-        self.assertGreater(candidate.gross_tokens, 0)
+        self.assertGreater(candidate.removes_advertised_max_tokens.tokens, 0)
+        self.assertIsNotNone(candidate.removes_upfront_floor_tokens)
         self.assertIsNotNone(candidate.reactivates)
         self.assertEqual(candidate.reactivates.server, "serena")
         self.assertEqual(candidate.reactivates.scope, "user")
@@ -286,14 +463,14 @@ class PruneClassificationTests(unittest.TestCase):
         )
 
     def test_project_scope_without_shadow_is_candidate(self) -> None:
-        cfg = self._cfg("proj_srv", scope="project", precedence=2)
+        cfg = self._cfg("proj_srv", scope="project", precedence=1)
 
         report = self._report([cfg], [self._tools("proj_srv", 2)])
 
         candidate = report.suggestions[0]
         self.assertEqual(candidate.kind, "candidate")
         self.assertIsNone(candidate.reactivates)
-        self.assertIsNone(candidate.net_tokens)
+        self.assertIsNotNone(candidate.removes_upfront_floor_tokens)
         self.assertTrue(
             any("per-project" in reason for reason in candidate.reasons)
         )
@@ -312,14 +489,14 @@ class PruneClassificationTests(unittest.TestCase):
         suggestion = report.suggestions[0]
         self.assertEqual(suggestion.kind, "suggestion")
         self.assertIsNone(suggestion.reactivates)
-        self.assertEqual(suggestion.net_tokens, suggestion.gross_tokens)
+        self.assertGreater(suggestion.removes_advertised_max_tokens.tokens, 0)
 
     def test_zero_token_measured_prune_is_excluded(self) -> None:
         cfg = self._cfg("empty", scope="user", precedence=0)
 
         report = self._report([cfg], [self._tools("empty", 0)])
 
-        # The row is still a prune verdict, but "save ~0" is not a suggestion.
+        # The row is still a prune verdict, but zero cost is not a suggestion.
         self.assertEqual(report.rows[0].verdict, "prune")
         self.assertEqual(report.suggestions, [])
 
@@ -334,7 +511,7 @@ class PruneClassificationTests(unittest.TestCase):
 
         candidate = report.suggestions[0]
         self.assertEqual(candidate.kind, "candidate")
-        self.assertIsNone(candidate.net_tokens)
+        self.assertIsNotNone(candidate.removes_upfront_floor_tokens)
         self.assertTrue(
             any("could not be parsed" in reason for reason in candidate.reasons)
         )
@@ -363,7 +540,7 @@ class PruneClassificationTests(unittest.TestCase):
 
         candidate = report.suggestions[0]
         self.assertEqual(candidate.kind, "candidate")
-        self.assertIsNone(candidate.net_tokens)
+        self.assertIsNotNone(candidate.removes_upfront_floor_tokens)
         self.assertIn(
             "a project layer may redefine this server", candidate.reasons
         )

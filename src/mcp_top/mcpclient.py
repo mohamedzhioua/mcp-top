@@ -31,6 +31,7 @@ class ServerTools:
     status: str
     error: str | None
     tools: list[dict]
+    instructions: str | None = None
     filtered_tools: int = 0
     unmatched_enabled_tools: list[str] = field(default_factory=list)
 
@@ -38,6 +39,16 @@ class ServerTools:
 def list_server_tools(cfg: ServerConfig, timeout: float = 20.0) -> ServerTools:
     """Query one stdio server for all tool definitions without leaking errors."""
 
+    if cfg.reserved:
+        return ServerTools(
+            server=cfg.name,
+            status="unsupported",
+            error=(
+                "reserved Claude Code server name -- Claude Code skips it "
+                "at load time"
+            ),
+            tools=[],
+        )
     if cfg.enabled is False:
         return ServerTools(
             server=cfg.name,
@@ -114,7 +125,15 @@ def list_server_tools(cfg: ServerConfig, timeout: float = 20.0) -> ServerTools:
                 },
             },
         )
-        _wait_for_response(messages, 1, deadline, timeout)
+        initialize_response = _wait_for_response(
+            messages, 1, deadline, timeout, "initialize"
+        )
+        initialize_result = initialize_response.get("result")
+        instructions = None
+        if isinstance(initialize_result, dict) and isinstance(
+            initialize_result.get("instructions"), str
+        ):
+            instructions = initialize_result["instructions"]
         _send(
             process.stdin,
             {"jsonrpc": "2.0", "method": "notifications/initialized"},
@@ -134,7 +153,7 @@ def list_server_tools(cfg: ServerConfig, timeout: float = 20.0) -> ServerTools:
                 },
             )
             response = _wait_for_response(
-                messages, request_id, deadline, timeout
+                messages, request_id, deadline, timeout, "tools/list"
             )
             result = response.get("result")
             if not isinstance(result, dict):
@@ -160,6 +179,7 @@ def list_server_tools(cfg: ServerConfig, timeout: float = 20.0) -> ServerTools:
             status="ok",
             error=None,
             tools=filtered_tools,
+            instructions=instructions,
             filtered_tools=hidden,
             unmatched_enabled_tools=unmatched,
         )
@@ -262,6 +282,7 @@ def _wait_for_response(
     response_id: int,
     deadline: float,
     timeout: float,
+    operation: str,
 ) -> dict[str, Any]:
     while True:
         remaining = deadline - time.monotonic()
@@ -272,7 +293,7 @@ def _wait_for_response(
         except queue.Empty:
             raise TimeoutError(f"timeout after {timeout:g} seconds") from None
         if kind == "error":
-            raise RuntimeError(f"could not read server output: {payload}")
+            raise RuntimeError("could not read server output")
         if kind == "eof":
             raise RuntimeError(
                 f"server closed stdout before response id {response_id}"
@@ -286,9 +307,26 @@ def _wait_for_response(
         if "method" in message or not ({"result", "error"} & message.keys()):
             continue
         if "error" in message:
-            error = json.dumps(message["error"], ensure_ascii=False)
-            raise RuntimeError(f"server returned JSON-RPC error: {error}")
+            raise RuntimeError(
+                f"{operation} failed "
+                f"({_protocol_error_category(message['error'])})"
+            )
         return message
+
+
+def _protocol_error_category(error: Any) -> str:
+    """Reduce a server-controlled JSON-RPC error to a stable, safe category.
+
+    ``message``/``data`` are entirely server-controlled and are never
+    retained anywhere (human output, JSON, coverage): only the documented
+    numeric ``code``, when present, survives to the report.
+    """
+
+    if isinstance(error, dict):
+        code = error.get("code")
+        if isinstance(code, int) and not isinstance(code, bool):
+            return f"code {code}"
+    return "no code"
 
 
 def _stop_process(process: subprocess.Popen[bytes]) -> None:

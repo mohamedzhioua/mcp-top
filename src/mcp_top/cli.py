@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
+import shlex
 import sys
 from dataclasses import asdict
 
@@ -80,6 +82,9 @@ CLIS = {
 }
 
 
+_TOML_BARE_KEY = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run mcp-top, returning 2 for invalid usage or an internal failure."""
 
@@ -127,6 +132,17 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="do not launch configured MCP servers",
     )
+    parser.add_argument(
+        "--query-project",
+        action="store_true",
+        help=(
+            "also launch project-scope MCP servers (Claude project "
+            ".mcp.json, Cursor project .cursor/mcp.json); off by default "
+            "because a project's config is untrusted input (e.g. a cloned "
+            "repo) and Claude Code itself gates project servers behind "
+            "workspace trust -- pass this only in trusted repos"
+        ),
+    )
     parser.add_argument("--json", action="store_true", help="emit JSON")
     parser.add_argument(
         "--prune",
@@ -159,7 +175,9 @@ def _build(args: argparse.Namespace) -> Report:
         entry = CLIS[cli_name]
         servers, warnings = entry["discover_servers"](args.home, args.project)
         server_tools_list = [
-            _load_server_tools(server, args.no_query, args.timeout)
+            _load_server_tools(
+                server, args.no_query, args.timeout, args.query_project
+            )
             for server in servers
         ]
         find_transcripts_func = entry["find_transcripts"]
@@ -199,8 +217,31 @@ def _build(args: argparse.Namespace) -> Report:
 
 
 def _load_server_tools(
-    server: ServerConfig, no_query: bool, timeout: float
+    server: ServerConfig,
+    no_query: bool,
+    timeout: float,
+    query_project: bool = False,
 ) -> ServerTools:
+    if server.reserved:
+        return ServerTools(
+            server=server.name,
+            status="unsupported",
+            error=(
+                "reserved Claude Code server name -- Claude Code skips it "
+                "at load time"
+            ),
+            tools=[],
+        )
+    if server.scope == "project" and not query_project:
+        return ServerTools(
+            server=server.name,
+            status="unsupported",
+            error=(
+                "project scope not queried by default; pass "
+                "--query-project in trusted repos"
+            ),
+            tools=[],
+        )
     if server.enabled is False:
         return ServerTools(
             server=server.name,
@@ -227,7 +268,7 @@ def _load_server_tools(
 
 def _report_json(report: Report, include_prune: bool = False) -> dict:
     payload = {
-        "schema": "mcp-top/v2",
+        "schema": "mcp-top/v3",
         "generated_note": report.generated_note,
         "clis": [
             _cli_json(cli_report, include_prune) for cli_report in report.clis
@@ -253,16 +294,14 @@ def _cli_json(cli_report: CliReport, include_prune: bool = False) -> dict:
         "servers": [_row_json(row) for row in cli_report.rows],
     }
     if include_prune:
-        # Additive field: the suggested_removals array appears only with
-        # --prune. Plain --json stays backward-compatible within schema
-        # mcp-top/v2 (it never carries this key).
         entry["suggested_removals"] = [
-            _suggestion_json(item) for item in cli_report.suggestions
+            _suggestion_json(cli_report.cli, item)
+            for item in cli_report.suggestions
         ]
     return entry
 
 
-def _suggestion_json(item: PruneSuggestion) -> dict:
+def _suggestion_json(cli_name: str, item: PruneSuggestion) -> dict:
     reactivates = None
     if item.reactivates is not None:
         reactivates = {
@@ -275,25 +314,27 @@ def _suggestion_json(item: PruneSuggestion) -> dict:
         "server": item.server,
         "scope": item.scope,
         "source_path": item.source_path,
-        "gross_tokens": {"value": item.gross_tokens, "exact": item.gross_exact},
-        "net_tokens": item.net_tokens,
+        "removes_advertised_max_tokens": _token_json(
+            item.removes_advertised_max_tokens
+        ),
+        "removes_upfront_floor_tokens": _token_json(
+            item.removes_upfront_floor_tokens
+        ),
         "reactivates": reactivates,
         "reasons": item.reasons,
+        "recipe": _recipe_json(_remediation_recipe(cli_name, item)),
     }
 
 
 def _row_json(row: ServerRow) -> dict:
-    def_tokens = None
-    if row.def_tokens is not None:
-        def_tokens = {
-            "value": row.def_tokens.tokens,
-            "exact": row.def_tokens.exact,
-        }
     return {
         "server": row.server,
         "scope": row.scope,
         "transport": row.transport,
-        "def_tokens": def_tokens,
+        "advertised_max_tokens": _token_json(row.advertised_max_tokens),
+        "upfront_floor_tokens": _token_json(row.upfront_floor_tokens),
+        "loading_regime": row.loading_regime,
+        "regime_evidence": row.regime_evidence,
         "def_status": row.def_status,
         "def_error": row.def_error,
         "tool_count": row.tool_count,
@@ -303,6 +344,12 @@ def _row_json(row: ServerRow) -> dict:
         "verdict": row.verdict,
         "filtered_tools": row.filtered_tools,
     }
+
+
+def _token_json(tokens: TokenCount | None) -> dict | None:
+    if tokens is None:
+        return None
+    return {"value": tokens.tokens, "exact": tokens.exact}
 
 
 def _render_human(report: Report, include_prune: bool = False) -> str:
@@ -326,7 +373,8 @@ def _render_cli_human(cli_report: CliReport, include_header: bool) -> str:
         "SERVER",
         "SCOPE",
         "TOOLS",
-        "DEF TOKENS",
+        "TOKEN RANGE",
+        "REGIME",
         "CALLS(window)",
         "VERDICT",
     )
@@ -334,12 +382,15 @@ def _render_cli_human(cli_report: CliReport, include_header: bool) -> str:
     for row in cli_report.rows:
         verdict = row.verdict
         if row.verdict == "prune":
-            # Provenance-aware: only a clean, global-scope removal earns a
-            # savings figure; everything else is a review candidate and never
-            # asserts a number without its caveats (shown under --prune).
             kind = suggestion_kind.get(row.server)
-            if kind == "suggestion" and row.def_tokens is not None:
-                verdict = f"prune -> save {fmt(row.def_tokens)}/session"
+            if kind == "suggestion" and row.advertised_max_tokens is not None:
+                verdict = (
+                    "prune -> "
+                    + _fmt_removal_range(
+                        row.advertised_max_tokens,
+                        row.upfront_floor_tokens,
+                    )
+                )
             elif kind == "candidate":
                 verdict = "prune candidate"
         if row.filtered_tools:
@@ -352,7 +403,8 @@ def _render_cli_human(cli_report: CliReport, include_header: bool) -> str:
                 row.server,
                 row.scope,
                 "?" if row.tool_count is None else str(row.tool_count),
-                "?" if row.def_tokens is None else fmt(row.def_tokens),
+                _fmt_token_range(row),
+                row.loading_regime,
                 "-" if row.calls is None else str(row.calls),
                 verdict,
             )
@@ -395,9 +447,10 @@ def _render_cli_human(cli_report: CliReport, include_header: bool) -> str:
 def _render_prune_block(report: Report) -> str:
     """Render the two-tier --prune section: clean suggestions, then candidates.
 
-    Never applied. Suggestions carry an estimated net saving; candidates carry
-    only a gross figure plus the specific reasons they need review. CLIs with
-    no usage adapter are reported explicitly rather than shown as an empty set.
+    Never applied. Suggestions and candidates carry an advertised-maximum and
+    upfront-floor removal range; candidates also explain why their actual
+    saving is unknown. CLIs with no usage adapter are reported explicitly
+    rather than shown as an empty set.
     """
 
     lines = [
@@ -412,18 +465,32 @@ def _render_prune_block(report: Report) -> str:
     ]
     if suggestions:
         for cli_name, item in suggestions:
-            saving = _fmt_tokens(item.net_tokens, item.gross_exact)
+            removal_range = _fmt_removal_range(
+                item.removes_advertised_max_tokens,
+                item.removes_upfront_floor_tokens,
+            )
             lines.append(
                 f"  - [{cli_name}] {_ascii(item.server)} ({item.scope}) in "
-                f"{_ascii(item.source_path)} -> est. net saving "
-                f"{saving}/session"
+                f"{_ascii(item.source_path)} -> "
+                f"{removal_range}"
             )
+            recipe = _remediation_recipe(cli_name, item)
+            if recipe["kind"] == "command":
+                lines.append(
+                    f"      command: {_ascii(_shell_join(recipe['argv']))}"
+                )
+            else:
+                lines.append(
+                    f"      edit: {_ascii(recipe['change'])}"
+                )
         lines.append("  (~ marks a chars/4 estimate, rough error +/-25%)")
     else:
         lines.append("  none")
 
     lines.append("")
-    lines.append("Prune candidates -- review before removing (net saving unknown):")
+    lines.append(
+        "Prune candidates -- review before removing (actual saving unknown):"
+    )
     candidates = [
         (cli.cli, item)
         for cli in report.clis
@@ -434,14 +501,20 @@ def _render_prune_block(report: Report) -> str:
     if not candidates and not unavailable:
         lines.append("  none")
     for cli_name, item in candidates:
-        gross = _fmt_tokens(item.gross_tokens, item.gross_exact)
+        removal_range = _fmt_removal_range(
+            item.removes_advertised_max_tokens,
+            item.removes_upfront_floor_tokens,
+        )
         lines.append(
             f"  - [{cli_name}] {_ascii(item.server)} ({item.scope}) in "
-            f"{_ascii(item.source_path)} -> removes {gross}/session gross, "
-            "net unknown"
+            f"{_ascii(item.source_path)} -> "
+            f"{removal_range}, "
+            "actual saving unknown"
         )
         for reason in item.reasons:
             lines.append(f"      * {_ascii(reason)}")
+        recipe = _remediation_recipe(cli_name, item)
+        lines.append(f"      edit: {_ascii(recipe['change'])}")
     for cli_name in unavailable:
         lines.append(
             f"  - [{cli_name}] usage unavailable (no transcript adapter) -- "
@@ -450,10 +523,139 @@ def _render_prune_block(report: Report) -> str:
     return "\n".join(lines)
 
 
-def _fmt_tokens(value: int | None, exact: bool) -> str:
-    if value is None:
-        return "unknown"
-    return fmt(TokenCount(tokens=value, exact=exact))
+def _remediation_recipe(
+    cli_name: str, item: PruneSuggestion
+) -> dict[str, object]:
+    """Return a recipe for a prune suggestion or candidate.
+
+    Only Claude Code's clean suggestions get an executable command
+    (``claude mcp remove``). Codex clean suggestions get precise structured
+    guidance -- the exact file, ``[mcp_servers.<name>]`` table, and the
+    exact ``enabled = false`` line to add -- but never a command: a
+    text-manipulation edit of a live TOML file can corrupt multiline
+    strings or drop comments, so mcp-top never emits one. Everything else
+    (all candidates, and every Cursor recipe) is guidance-only too.
+    """
+
+    if item.kind == "suggestion" and cli_name == "claude-code":
+        claude_scope = _claude_cli_scope(item.scope)
+        return {
+            "kind": "command",
+            "source_path": item.source_path,
+            "scope": item.scope,
+            "argv": [
+                "claude",
+                "mcp",
+                "remove",
+                "--scope",
+                claude_scope,
+                item.server,
+            ],
+            "change": (
+                f"Remove {claude_scope}-scope Claude Code MCP server "
+                f"{item.server!r}; source config {item.source_path} "
+                f"({item.scope} scope)."
+            ),
+        }
+
+    return _guidance_recipe(cli_name, item)
+
+
+def _guidance_recipe(cli_name: str, item: PruneSuggestion) -> dict[str, object]:
+    if cli_name == "codex":
+        table = _codex_table_header(item.server)
+        change = (
+            f"Edit {item.source_path} ({item.scope} scope): set "
+            f"enabled = false under {table}. For tool-level pruning, add "
+            "the unused tool name to disabled_tools in that same table."
+        )
+    elif cli_name == "cursor":
+        change = (
+            f"Edit {item.source_path} ({item.scope} scope): review "
+            f"mcpServers.{item.server!r} and disable or remove it in that "
+            "exact mcp.json file only after checking the candidate reasons."
+        )
+    elif cli_name == "claude-code":
+        change = (
+            f"Review {item.source_path} ({item.scope} scope) before changing "
+            f"Claude Code MCP server {item.server!r}; candidates intentionally "
+            "do not include removal commands."
+        )
+    else:
+        change = (
+            f"Review {item.source_path} ({item.scope} scope) before changing "
+            f"MCP server {item.server!r}; candidates intentionally do not "
+            "include commands."
+        )
+    return {
+        "kind": "guidance",
+        "source_path": item.source_path,
+        "scope": item.scope,
+        "change": change,
+    }
+
+
+def _recipe_json(recipe: dict[str, object]) -> dict[str, object]:
+    payload = {
+        "kind": recipe["kind"],
+        "source_path": recipe["source_path"],
+        "scope": recipe["scope"],
+        "change": recipe["change"],
+    }
+    if recipe["kind"] == "command":
+        payload["argv"] = recipe["argv"]
+    return payload
+
+
+def _claude_cli_scope(scope: str) -> str:
+    return {"user-project": "local", "project": "project", "user": "user"}.get(
+        scope,
+        scope,
+    )
+
+
+def _codex_table_header(server_name: str) -> str:
+    return f"[mcp_servers.{_toml_key(server_name)}]"
+
+
+def _toml_key(value: str) -> str:
+    if _TOML_BARE_KEY.fullmatch(value):
+        return value
+    return json.dumps(value, ensure_ascii=True)
+
+
+def _shell_join(argv: object) -> str:
+    if not isinstance(argv, list):
+        return ""
+    return " ".join(shlex.quote(str(part)) for part in argv)
+
+
+def _fmt_token_range(row: ServerRow) -> str:
+    if row.advertised_max_tokens is None:
+        return "?"
+    if (
+        row.upfront_floor_tokens is not None
+        and row.upfront_floor_tokens.tokens == row.advertised_max_tokens.tokens
+        and row.upfront_floor_tokens.exact == row.advertised_max_tokens.exact
+    ):
+        return fmt(row.advertised_max_tokens)
+    floor = (
+        "?"
+        if row.upfront_floor_tokens is None
+        else fmt(row.upfront_floor_tokens)
+    )
+    return f">={floor}..{fmt(row.advertised_max_tokens)}"
+
+
+def _fmt_removal_range(
+    advertised: TokenCount,
+    upfront: TokenCount | None,
+) -> str:
+    floor = "unknown" if upfront is None else fmt(upfront)
+    return (
+        f"removes advertised up to {fmt(advertised)} / "
+        f"upfront at least {floor}"
+    )
 
 
 def _ascii(text: str) -> str:

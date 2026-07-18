@@ -37,6 +37,14 @@ def discover_servers(
         warnings,
         "mcp_servers",
     )
+    for server in servers:
+        server.loading_regime = "unknown"
+        server.regime_evidence = [
+            "codex: upstream Codex has a tool-search/deferred-exposure "
+            "mechanism (openai/codex mcp_tool_exposure); whether it is "
+            "active for this server is not observable from local config "
+            "files, so effective exposure is unknown"
+        ]
     _apply_project_layer_caveats(servers, project_names, project_unreadable)
     return servers, warnings
 

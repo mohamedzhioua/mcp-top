@@ -53,6 +53,12 @@ def discover_servers(
                 warnings,
             )
 
+    for server in servers.values():
+        server.loading_regime = "unknown"
+        server.regime_evidence = [
+            "cursor: Dynamic Context Discovery regime is not observable from "
+            "local MCP config"
+        ]
     return list(servers.values()), warnings
 
 

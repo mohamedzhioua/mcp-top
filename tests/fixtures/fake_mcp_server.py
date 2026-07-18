@@ -22,6 +22,7 @@ def serve() -> None:
                         "protocolVersion": "2025-06-18",
                         "capabilities": {"tools": {}},
                         "serverInfo": {"name": "fake", "version": "1.0"},
+                        "instructions": "Fake server instructions.",
                     },
                 }
             )
@@ -70,6 +71,30 @@ def serve() -> None:
                 )
 
 
+def serve_error(sentinel: str) -> None:
+    """Reply to ``initialize`` with a JSON-RPC error carrying a sentinel.
+
+    Used to prove a malicious or buggy server cannot smuggle secrets into
+    any mcp-top output mode through ``error.message``/``error.data``.
+    """
+
+    for line in sys.stdin:
+        message = json.loads(line)
+        if message.get("method") == "initialize":
+            send(
+                {
+                    "jsonrpc": "2.0",
+                    "id": message["id"],
+                    "error": {
+                        "code": -32000,
+                        "message": f"boom: {sentinel}",
+                        "data": {"secret": sentinel},
+                    },
+                }
+            )
+            return
+
+
 def sleep_forever(pid_path: str) -> None:
     with open(pid_path, "w", encoding="utf-8") as handle:
         handle.write(str(os.getpid()))
@@ -96,6 +121,8 @@ def sleep_with_grandchild(pid_path: str, grandchild_pid_path: str) -> None:
 if __name__ == "__main__":
     if sys.argv[1] == "serve":
         serve()
+    elif sys.argv[1] == "serve-error":
+        serve_error(sys.argv[2])
     elif sys.argv[1] == "sleep-with-grandchild":
         sleep_with_grandchild(sys.argv[2], sys.argv[3])
     else:

@@ -1,0 +1,14 @@
+# Pin sdist contents to a complete, runnable test tree. The wheel is
+# unaffected by this file -- it is built solely from
+# [tool.setuptools.packages.find] in pyproject.toml (src/mcp_top only).
+include LICENSE
+include README.md
+include CHANGELOG.md
+include pyproject.toml
+graft bin
+graft docs
+graft tests
+
+global-exclude __pycache__
+global-exclude *.py[cod]
+global-exclude *.pid

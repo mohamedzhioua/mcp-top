@@ -30,6 +30,7 @@ class McpClientTests(unittest.TestCase):
         self.assertEqual(result.server, "fake")
         self.assertEqual(result.status, "ok")
         self.assertIsNone(result.error)
+        self.assertEqual(result.instructions, "Fake server instructions.")
         self.assertEqual(
             [tool["name"] for tool in result.tools], ["first_tool", "second_tool"]
         )
@@ -97,7 +98,8 @@ class McpClientTests(unittest.TestCase):
         row = report.rows[0]
         self.assertEqual(row.tool_count, 1)
         self.assertEqual(row.filtered_tools, 1)
-        self.assertIsNotNone(row.def_tokens)
+        self.assertIsNotNone(row.advertised_max_tokens)
+        self.assertIsNotNone(row.upfront_floor_tokens)
 
     def test_unmatched_enabled_tools_are_reported(self) -> None:
         config = self._config(
@@ -121,6 +123,19 @@ class McpClientTests(unittest.TestCase):
 
         self.assertEqual(result.status, "ok")
         self.assertEqual(result.unmatched_enabled_tools, [])
+
+    def test_protocol_error_is_reduced_to_a_safe_category(self) -> None:
+        sentinel = "sk_live_DO_NOT_LEAK"
+        config = self._config(
+            sys.executable, [FAKE_SERVER, "serve-error", sentinel]
+        )
+
+        result = list_server_tools(config, timeout=5)
+
+        self.assertEqual(result.status, "error")
+        self.assertEqual(result.error, "initialize failed (code -32000)")
+        self.assertNotIn(sentinel, result.error)
+        self.assertNotIn("boom", result.error)
 
     def test_timeout_returns_error_and_stops_child(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
