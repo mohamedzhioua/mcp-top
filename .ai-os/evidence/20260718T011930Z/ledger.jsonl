@@ -1,1 +1,0 @@
-{"label":"mcp-top-v040-final-tests","command":"bash tests/run.sh","exit_code":0,"sha256":"e92e7e27a978dacde5ac9296e110fb4fdd62d1c9ec93893adafcc20bd6bd4c3f","log":".ai-os/evidence/20260718T011930Z/mcp-top-v040-final-tests.log","at":"2026-07-18T01:19:38Z","runtime":"unknown","expect":"test","match":"unresolvable"}
