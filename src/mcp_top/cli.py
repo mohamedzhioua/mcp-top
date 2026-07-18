@@ -618,8 +618,8 @@ def _render_prune_block(report: Report) -> str:
 
     Never applied. Suggestions and candidates carry an advertised-maximum and
     upfront-floor removal range; candidates also explain why their actual
-    saving is unknown. CLIs with no usage adapter are reported explicitly
-    rather than shown as an empty set.
+    removal impact is unknown. CLIs with no usage adapter are reported
+    explicitly rather than shown as an empty set.
     """
 
     lines = [
@@ -658,7 +658,8 @@ def _render_prune_block(report: Report) -> str:
 
     lines.append("")
     lines.append(
-        "Prune candidates -- review before removing (actual saving unknown):"
+        "Prune candidates -- review before removing "
+        "(actual removal impact unknown):"
     )
     candidates = [
         (cli.cli, item)
@@ -678,7 +679,7 @@ def _render_prune_block(report: Report) -> str:
             f"  - [{cli_name}] {_ascii(item.server)} ({item.scope}) in "
             f"{_ascii(item.source_path)} -> "
             f"{removal_range}, "
-            "actual saving unknown"
+            "actual removal impact unknown"
         )
         for reason in item.reasons:
             lines.append(f"      * {_ascii(reason)}")

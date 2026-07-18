@@ -306,7 +306,8 @@ def _prune_suggestions(
                 reasons.append(
                     f"deleting this reactivates {immediate.scope}-scope "
                     f"'{immediate.name}' from {immediate.source_path}; net "
-                    "saving is unknown -- it may be lower, unchanged, or higher"
+                    "removal impact is unknown -- it may be lower, unchanged, "
+                    "or higher"
                 )
 
         if provenance_incomplete:

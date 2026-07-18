@@ -12,8 +12,8 @@ Suggested removals (never applied; mcp-top is read-only -- edit configs yourself
       command: claude mcp remove --scope user alpha
   (~ marks a chars/4 estimate, rough error +/-25%)
 
-Prune candidates -- review before removing (actual saving unknown):
-  - [claude-code] beta (project) in /repo/.mcp.json -> removes advertised up to ~12 / upfront at least ~12, actual saving unknown
+Prune candidates -- review before removing (actual removal impact unknown):
+  - [claude-code] beta (project) in /repo/.mcp.json -> removes advertised up to ~12 / upfront at least ~12, actual removal impact unknown
       * usage is counted across all projects (home-wide), not per-project; pass --project-usage to scope counts to this project before removing
       edit: Review /repo/.mcp.json (project scope) before changing Claude Code MCP server 'beta'; candidates intentionally do not include removal commands.
 

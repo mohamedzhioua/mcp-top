@@ -721,7 +721,7 @@ class CliTests(unittest.TestCase):
         # The table verdict must not assert a savings number for a candidate.
         self.assertIn("prune candidate", output)
         self.assertNotIn("prune -> save", output)
-        self.assertIn("actual saving unknown", output)
+        self.assertIn("actual removal impact unknown", output)
         self.assertIn("edit:", output)
 
     def test_invalid_env_secret_appears_in_no_output_mode(self) -> None:
