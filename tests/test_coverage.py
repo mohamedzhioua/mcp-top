@@ -117,6 +117,32 @@ class CoverageTests(unittest.TestCase):
         self.assertIn("usage: unknown (no transcript adapter)", rendered)
         self.assertNotIn("0 in window; 0 tool calls (0 MCP)", rendered)
 
+    def test_project_filter_renders_attribution_line_without_raw_key(self) -> None:
+        coverage = Coverage(
+            transcripts_found=3,
+            transcripts_parsed=3,
+            transcripts_skipped=[],
+            in_window=3,
+            total_tool_calls=5,
+            mcp_tool_calls=2,
+            servers_queried_ok=1,
+            servers_query_failed=[],
+            config_warnings=[],
+            project_filter_active=True,
+            sessions_with_project=2,
+            sessions_unattributed=1,
+            sessions_matching_project=1,
+        )
+
+        rendered = render_coverage_text(coverage)
+
+        self.assertIn(
+            "usage scoped to the current project: 1 in-project session(s), "
+            "1 unattributed session(s) excluded",
+            rendered,
+        )
+        self.assertNotIn("project-a", rendered)
+
     def test_shorten_codex_session_paths(self) -> None:
         coverage = Coverage(
             transcripts_found=1,

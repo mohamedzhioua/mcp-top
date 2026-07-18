@@ -18,4 +18,6 @@ def normalize_project_key(path: str) -> str:
 def claude_project_slug(path: str) -> str:
     """Encode an absolute project path using Claude Code's lossy slug scheme."""
 
+    # Claude stores no cwd in transcripts, only this lossy slug. Matching is
+    # best-effort and can collide or miss aliases; do not infer path identity.
     return re.sub(r"[^A-Za-z0-9]", "-", path)

@@ -133,6 +133,84 @@ class CliTests(unittest.TestCase):
         self.assertIsNone(server["advertised_max_tokens"])
         self.assertIsNone(server["upfront_floor_tokens"])
 
+    def test_project_usage_scopes_calls_to_current_project(self) -> None:
+        projects_dir = os.path.join(self.home, ".claude", "projects")
+        shutil.rmtree(projects_dir)
+        current_slug = cli.claude_project_slug(
+            os.path.normpath(os.path.abspath(self.project))
+        )
+        current_dir = os.path.join(projects_dir, current_slug)
+        other_dir = os.path.join(projects_dir, "other-project")
+        os.makedirs(current_dir)
+        os.makedirs(other_dir)
+        self._write_claude_session(
+            os.path.join(current_dir, "current.jsonl"),
+            calls=1,
+            timestamp="2026-06-15T12:00:00Z",
+        )
+        self._write_claude_session(
+            os.path.join(other_dir, "other.jsonl"),
+            calls=4,
+            timestamp="2026-06-14T12:00:00Z",
+        )
+
+        _, default_output = self._run("--json")
+        _, scoped_output = self._run("--json", "--project-usage")
+
+        default_row = json.loads(default_output)["clis"][0]["servers"][0]
+        scoped_payload = json.loads(scoped_output)
+        scoped_cli = scoped_payload["clis"][0]
+        scoped_row = scoped_cli["servers"][0]
+        self.assertEqual(default_row["server"], "github")
+        self.assertEqual(default_row["calls"], 5)
+        self.assertEqual(default_row["verdict"], "keep")
+        self.assertEqual(scoped_row["server"], "github")
+        self.assertEqual(scoped_row["calls"], 1)
+        self.assertEqual(scoped_row["verdict"], "review")
+        self.assertTrue(scoped_cli["coverage"]["project_filter_active"])
+        self.assertEqual(scoped_cli["coverage"]["sessions_with_project"], 2)
+        self.assertEqual(scoped_cli["coverage"]["sessions_unattributed"], 0)
+        self.assertEqual(scoped_cli["coverage"]["sessions_matching_project"], 1)
+        self.assertNotIn("project_filter", scoped_cli["coverage"])
+        self.assertNotIn(current_slug, scoped_output)
+
+    def test_project_usage_without_matching_sessions_is_unknown_without_prune(self) -> None:
+        projects_dir = os.path.join(self.home, ".claude", "projects")
+        shutil.rmtree(projects_dir)
+        other_dir = os.path.join(projects_dir, "other-project")
+        os.makedirs(other_dir)
+        self._write_claude_session(
+            os.path.join(other_dir, "other.jsonl"),
+            calls=1,
+            timestamp="2026-06-15T12:00:00Z",
+        )
+        current_slug = cli.claude_project_slug(
+            os.path.normpath(os.path.abspath(self.project))
+        )
+
+        exit_code, output = self._run(
+            "--json",
+            "--prune",
+            "--project-usage",
+            "--sessions",
+            "1",
+        )
+
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(output)
+        cli_payload = payload["clis"][0]
+        row = next(
+            row for row in cli_payload["servers"] if row["server"] == "github"
+        )
+        self.assertIsNone(row["calls"])
+        self.assertEqual(row["usage_status"], "no-data")
+        self.assertEqual(row["verdict"], "unknown")
+        self.assertEqual(cli_payload["suggested_removals"], [])
+        self.assertTrue(cli_payload["coverage"]["project_filter_active"])
+        self.assertEqual(cli_payload["coverage"]["sessions_matching_project"], 0)
+        self.assertNotIn("project_filter", cli_payload["coverage"])
+        self.assertNotIn(current_slug, output)
+
     def test_json_emits_nullable_calls_and_usage_status(self) -> None:
         report = Report(
             clis=[
@@ -690,6 +768,31 @@ class CliTests(unittest.TestCase):
             ) as handle:
                 json.dump({"mcpServers": project_servers}, handle)
 
+    def _write_claude_session(
+        self, path: str, *, calls: int, timestamp: str
+    ) -> None:
+        with open(path, "w", encoding="utf-8") as handle:
+            for index in range(calls):
+                json.dump(
+                    {
+                        "version": "2.1.211",
+                        "sessionId": os.path.basename(path),
+                        "timestamp": timestamp,
+                        "type": "assistant",
+                        "message": {
+                            "content": [
+                                {
+                                    "type": "tool_use",
+                                    "id": f"call-{index}",
+                                    "name": "mcp__github__first_tool",
+                                }
+                            ]
+                        },
+                    },
+                    handle,
+                )
+                handle.write("\n")
+
     def _run(self, *extra: str) -> tuple[int, str]:
         return self._run_with_home_project(self.home, self.project, *extra)
 
@@ -757,6 +860,10 @@ class CliTests(unittest.TestCase):
             servers_queried_ok=2,
             servers_query_failed=[],
             config_warnings=[],
+            project_filter_active=False,
+            sessions_with_project=2,
+            sessions_unattributed=0,
+            sessions_matching_project=0,
         )
         rows = [
             ServerRow(
@@ -816,7 +923,11 @@ class CliTests(unittest.TestCase):
                 removes_advertised_max_tokens=TokenCount(12, False),
                 removes_upfront_floor_tokens=TokenCount(12, False),
                 reactivates=None,
-                reasons=["usage is not attributed per-project; verify before removing"],
+                reasons=[
+                    "usage is counted across all projects (home-wide), not "
+                    "per-project; pass --project-usage to scope counts to this "
+                    "project before removing"
+                ],
             ),
         ]
         return Report(

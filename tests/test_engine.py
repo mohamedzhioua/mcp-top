@@ -330,6 +330,44 @@ class EngineTests(unittest.TestCase):
         self._assert_no_data_unknown(report)
         self.assertEqual(report.coverage.future_sessions, 1)
 
+    def test_project_usage_zero_matching_sessions_is_no_data_not_prune(self) -> None:
+        sessions = [
+            SessionResult(
+                path="other",
+                session_id="other",
+                status="parsed",
+                skip_reason=None,
+                versions_seen=["2.1.211"],
+                tool_calls=[
+                    self._call("mcp__alpha__lookup", "2026-06-15T12:00:00Z")
+                ],
+                first_ts="2026-06-15T12:00:00Z",
+                last_ts="2026-06-15T12:00:00Z",
+                project="project-b",
+            )
+        ]
+        window = count_calls(
+            sessions,
+            [session.path for session in sessions],
+            window_sessions=1,
+            window_days=30,
+            now=datetime(2026, 6, 15, 12, 0, tzinfo=timezone.utc),
+            project_filter="project-a",
+        )
+
+        report = build_cli_report(
+            "claude-code",
+            [self._server("alpha")],
+            [self._tools("alpha", 1)],
+            sessions,
+            window,
+        )
+
+        self.assertEqual(window.sessions_considered, 0)
+        self.assertEqual(window.sessions_matching_project, 0)
+        self._assert_no_data_unknown(report)
+        self.assertEqual(report.suggestions, [])
+
     def _server(self, name: str) -> ServerConfig:
         return ServerConfig(
             name=name,
@@ -471,8 +509,131 @@ class PruneClassificationTests(unittest.TestCase):
         self.assertEqual(candidate.kind, "candidate")
         self.assertIsNone(candidate.reactivates)
         self.assertIsNotNone(candidate.removes_upfront_floor_tokens)
-        self.assertTrue(
-            any("per-project" in reason for reason in candidate.reasons)
+        self.assertIn(
+            (
+                "usage is counted across all projects (home-wide), not "
+                "per-project; pass --project-usage to scope counts to this "
+                "project before removing"
+            ),
+            candidate.reasons,
+        )
+
+    def test_project_usage_other_project_calls_force_candidate(self) -> None:
+        cfg = self._cfg("serena", scope="user", precedence=0)
+        window = self._window(
+            project_filter="project-a",
+            server_calls_by_project={"serena": {"project-b": 2}},
+        )
+
+        report = self._report([cfg], [self._tools("serena", 2)], window=window)
+
+        candidate = report.suggestions[0]
+        self.assertEqual(candidate.kind, "candidate")
+        self.assertIn(
+            (
+                "server has 2 call(s) in other project(s); removing the "
+                "user-scope entry may affect them, and name-only usage cannot "
+                "prove they used this entry rather than a local override -- "
+                "verify before removing"
+            ),
+            candidate.reasons,
+        )
+
+    def test_project_usage_other_project_reason_is_user_scope_only(self) -> None:
+        cfg = self._cfg("serena", scope="project", precedence=1)
+        window = self._window(
+            project_filter="project-a",
+            server_calls_by_project={"serena": {"project-b": 2}},
+        )
+
+        report = self._report([cfg], [self._tools("serena", 2)], window=window)
+
+        suggestion = report.suggestions[0]
+        self.assertEqual(suggestion.kind, "suggestion")
+        self.assertFalse(
+            any("other project(s)" in reason for reason in suggestion.reasons)
+        )
+
+    def test_project_usage_unused_everywhere_is_clean_suggestion(self) -> None:
+        cfg = self._cfg("serena", scope="user", precedence=0)
+        window = self._window(project_filter="project-a")
+
+        report = self._report([cfg], [self._tools("serena", 2)], window=window)
+
+        suggestion = report.suggestions[0]
+        self.assertEqual(suggestion.kind, "suggestion")
+        self.assertEqual(suggestion.reasons, [])
+
+    def test_project_usage_unattributed_calls_force_candidate(self) -> None:
+        cfg = self._cfg("serena", scope="user", precedence=0)
+        window = self._window(
+            project_filter="project-a",
+            server_calls_by_project={"serena": {"(unattributed)": 3}},
+        )
+
+        report = self._report([cfg], [self._tools("serena", 2)], window=window)
+
+        candidate = report.suggestions[0]
+        self.assertEqual(candidate.kind, "candidate")
+        self.assertIn(
+            (
+                "3 call(s) could not be attributed to a project; verify "
+                "before removing"
+            ),
+            candidate.reasons,
+        )
+
+    def test_project_usage_unattributed_session_forces_candidate(self) -> None:
+        cfg = self._cfg("serena", scope="user", precedence=0)
+        window = self._window(
+            project_filter="project-a",
+            sessions_unattributed=1,
+        )
+
+        report = self._report([cfg], [self._tools("serena", 2)], window=window)
+
+        candidate = report.suggestions[0]
+        self.assertEqual(candidate.kind, "candidate")
+        self.assertIn(
+            (
+                "the recent window has 1 session(s) with no recorded project, "
+                "which may belong to this project; cannot confirm this server "
+                "is unused here -- verify before removing"
+            ),
+            candidate.reasons,
+        )
+
+    def test_project_usage_unattributed_mcp_call_forces_candidate(self) -> None:
+        cfg = self._cfg("serena", scope="user", precedence=0)
+        window = self._window(
+            project_filter="project-a",
+            unattributed_mcp_calls=2,
+        )
+
+        report = self._report([cfg], [self._tools("serena", 2)], window=window)
+
+        candidate = report.suggestions[0]
+        self.assertEqual(candidate.kind, "candidate")
+        self.assertIn(
+            (
+                "2 MCP call(s) in the window could not be attributed to a "
+                "server and may be this one; verify before removing"
+            ),
+            candidate.reasons,
+        )
+
+    def test_default_mode_non_user_scope_reason_string(self) -> None:
+        cfg = self._cfg("serena", scope="project", precedence=1)
+
+        report = self._report([cfg], [self._tools("serena", 2)])
+
+        self.assertIn(
+            (
+                "usage is counted across all projects (home-wide), not "
+                "per-project; pass --project-usage to scope counts to this "
+                "project before removing"
+            ),
+            report.suggestions[0].reasons,
         )
 
     def test_disabled_shadow_does_not_reactivate(self) -> None:
@@ -545,16 +706,9 @@ class PruneClassificationTests(unittest.TestCase):
             "a project layer may redefine this server", candidate.reasons
         )
 
-    def _report(self, servers, definitions, config_warnings=None):
-        window = UsageWindow(
-            sessions_considered=1,
-            window_sessions=30,
-            window_days=30,
-            counts={},
-            sidechain_counts={},
-            server_tool_counts={},
-            unattributed_mcp_calls=0,
-        )
+    def _report(self, servers, definitions, config_warnings=None, window=None):
+        if window is None:
+            window = self._window()
         return build_cli_report(
             "claude-code",
             servers,
@@ -562,6 +716,31 @@ class PruneClassificationTests(unittest.TestCase):
             [],
             window,
             config_warnings=config_warnings,
+        )
+
+    def _window(
+        self,
+        *,
+        project_filter=None,
+        server_calls_by_project=None,
+        sessions_unattributed=0,
+        unattributed_mcp_calls=0,
+    ) -> UsageWindow:
+        return UsageWindow(
+            sessions_considered=1,
+            window_sessions=30,
+            window_days=30,
+            counts={},
+            sidechain_counts={},
+            server_tool_counts={},
+            unattributed_mcp_calls=unattributed_mcp_calls,
+            project_filter=project_filter,
+            sessions_with_project=1,
+            sessions_unattributed=sessions_unattributed,
+            sessions_matching_project=1 if project_filter is not None else 0,
+            server_calls_by_project=(
+                {} if server_calls_by_project is None else server_calls_by_project
+            ),
         )
 
     def _cfg(

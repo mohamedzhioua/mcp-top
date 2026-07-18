@@ -33,6 +33,10 @@ class Coverage:
     unmatched_enabled_tools: list[tuple[str, list[str]]] = field(
         default_factory=list
     )
+    project_filter_active: bool = False
+    sessions_with_project: int = 0
+    sessions_unattributed: int = 0
+    sessions_matching_project: int = 0
 
 
 def build_coverage(
@@ -59,6 +63,10 @@ def build_coverage(
     unattributed_mcp_calls = 0
     in_window: int | None = None
     future_sessions = 0
+    project_filter_active = False
+    sessions_with_project = 0
+    sessions_unattributed = 0
+    sessions_matching_project = 0
     if window is None:
         usage_note = usage_note or "no transcript adapter for this CLI"
     else:
@@ -71,6 +79,10 @@ def build_coverage(
         unattributed_mcp_calls = window.unattributed_mcp_calls
         in_window = window.sessions_considered
         future_sessions = window.future_sessions
+        project_filter_active = window.project_filter is not None
+        sessions_with_project = window.sessions_with_project
+        sessions_unattributed = window.sessions_unattributed
+        sessions_matching_project = window.sessions_matching_project
         if window.sessions_considered == 0:
             if not sessions:
                 usage_note = usage_note or "no transcripts found -- usage unknown"
@@ -119,6 +131,10 @@ def build_coverage(
             for result in server_tools_list
             if result.status == "ok" and result.unmatched_enabled_tools
         ],
+        project_filter_active=project_filter_active,
+        sessions_with_project=sessions_with_project,
+        sessions_unattributed=sessions_unattributed,
+        sessions_matching_project=sessions_matching_project,
     )
 
 
@@ -168,6 +184,12 @@ def render_coverage_text(cov: Coverage) -> str:
         lines.append(
             f"  {cov.unattributed_mcp_calls} MCP-prefixed call(s) could not "
             "be attributed to a server"
+        )
+    if cov.project_filter_active:
+        lines.append(
+            "  usage scoped to the current project: "
+            f"{cov.sessions_matching_project} in-project session(s), "
+            f"{cov.sessions_unattributed} unattributed session(s) excluded"
         )
     if cov.usage_note is not None:
         lines.append(f"  usage: {cov.usage_note}")

@@ -7,7 +7,7 @@ import unittest
 
 import _path  # noqa: F401
 
-from mcp_top.counter import count_calls
+from mcp_top.counter import _group_project, count_calls
 from mcp_top.transcripts import SessionResult, ToolCall
 
 
@@ -190,8 +190,152 @@ class CountCallsTests(unittest.TestCase):
         self.assertEqual(usage.server_tool_counts, {"github": {"get_pr": 1}})
         self.assertEqual(usage.unattributed_mcp_calls, 1)
 
+    def test_project_filter_uses_project_recent_groups_for_verdict_counts(self) -> None:
+        sessions = [
+            self._session(
+                "project-a",
+                "2026-06-15T12:00:00Z",
+                [
+                    self._mcp_call(
+                        "mcp__github__search",
+                        "github",
+                        "search",
+                        "2026-06-15T12:00:00Z",
+                    )
+                ],
+                project="project-a",
+            ),
+            self._session(
+                "project-b",
+                "2026-06-14T12:00:00Z",
+                [
+                    self._mcp_call(
+                        "mcp__github__search",
+                        "github",
+                        "search",
+                        "2026-06-14T12:00:00Z",
+                    )
+                ],
+                project="project-b",
+            ),
+            self._session(
+                "no-project",
+                "2026-06-13T12:00:00Z",
+                [
+                    self._mcp_call(
+                        "mcp__github__search",
+                        "github",
+                        "search",
+                        "2026-06-13T12:00:00Z",
+                    )
+                ],
+            ),
+        ]
+
+        usage = count_calls(
+            sessions,
+            [session.path for session in sessions],
+            window_sessions=30,
+            window_days=30,
+            now=NOW,
+            project_filter="project-a",
+        )
+        unfiltered = count_calls(
+            sessions,
+            [session.path for session in sessions],
+            window_sessions=30,
+            window_days=30,
+            now=NOW,
+        )
+
+        self.assertEqual(usage.project_filter, "project-a")
+        self.assertEqual(usage.sessions_considered, 1)
+        self.assertEqual(usage.sessions_with_project, 2)
+        self.assertEqual(usage.sessions_unattributed, 1)
+        self.assertEqual(usage.sessions_matching_project, 1)
+        self.assertEqual(usage.counts, {"mcp__github__search": 1})
+        self.assertEqual(usage.server_tool_counts, {"github": {"search": 1}})
+        self.assertEqual(
+            usage.server_calls_by_project,
+            {"github": {"project-a": 1, "project-b": 1, "(unattributed)": 1}},
+        )
+        self.assertEqual(
+            unfiltered.server_tool_counts,
+            {"github": {"search": 3}},
+        )
+        self.assertEqual(
+            unfiltered.server_calls_by_project,
+            usage.server_calls_by_project,
+        )
+
+    def test_project_filter_applies_before_session_cap(self) -> None:
+        sessions = [
+            self._session(
+                "other-project",
+                "2026-06-15T12:00:00Z",
+                [
+                    self._mcp_call(
+                        "mcp__github__other",
+                        "github",
+                        "other",
+                        "2026-06-15T12:00:00Z",
+                    )
+                ],
+                project="project-b",
+            ),
+            self._session(
+                "current-project",
+                "2026-06-14T12:00:00Z",
+                [
+                    self._mcp_call(
+                        "mcp__github__current",
+                        "github",
+                        "current",
+                        "2026-06-14T12:00:00Z",
+                    )
+                ],
+                project="project-a",
+            ),
+        ]
+
+        usage = count_calls(
+            sessions,
+            [session.path for session in sessions],
+            window_sessions=1,
+            window_days=30,
+            now=NOW,
+            project_filter="project-a",
+        )
+
+        self.assertEqual(usage.sessions_considered, 1)
+        self.assertEqual(usage.sessions_matching_project, 1)
+        self.assertEqual(usage.counts, {"mcp__github__current": 1})
+        self.assertEqual(usage.server_tool_counts, {"github": {"current": 1}})
+        self.assertEqual(
+            usage.server_calls_by_project,
+            {"github": {"project-b": 1}},
+        )
+
+    def test_group_project_conflict_is_unattributed(self) -> None:
+        files = [
+            (
+                datetime(2026, 6, 15, 12, 0, tzinfo=timezone.utc),
+                self._session("a", "2026-06-15T12:00:00Z", [], "project-a"),
+            ),
+            (
+                datetime(2026, 6, 15, 12, 1, tzinfo=timezone.utc),
+                self._session("b", "2026-06-15T12:01:00Z", [], "project-b"),
+            ),
+        ]
+
+        self.assertIsNone(_group_project(files))
+
     def _session(
-        self, path: str, last_ts: str | None, calls: list[ToolCall]
+        self,
+        path: str,
+        last_ts: str | None,
+        calls: list[ToolCall],
+        project: str | None = None,
     ) -> SessionResult:
         return SessionResult(
             path=path,
@@ -202,6 +346,7 @@ class CountCallsTests(unittest.TestCase):
             tool_calls=calls,
             first_ts=last_ts,
             last_ts=last_ts,
+            project=project,
         )
 
     def _call(

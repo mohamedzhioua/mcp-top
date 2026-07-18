@@ -26,6 +26,7 @@ from mcp_top.engine import (
     build_report,
 )
 from mcp_top.mcpclient import ServerTools, list_server_tools
+from mcp_top.projects import claude_project_slug, normalize_project_key
 from mcp_top.tokens import TokenCount, fmt
 
 
@@ -35,6 +36,11 @@ CLIS = {
         "find_transcripts": claude_code.find_transcripts,
         "parse_session": claude_code.parse_session,
         "session_key": claude_code.session_key,
+        # Claude transcripts expose only a lossy directory slug, so project
+        # matching is best-effort lexical matching rather than path identity.
+        "project_key": lambda project: claude_project_slug(
+            os.path.normpath(os.path.abspath(project))
+        ),
         "detected": lambda home, project: (
             os.path.exists(os.path.join(home, ".claude.json"))
             or os.path.exists(os.path.join(home, ".claude", "projects"))
@@ -49,6 +55,9 @@ CLIS = {
         "find_transcripts": codex_adapter.find_transcripts,
         "parse_session": codex_adapter.parse_session,
         "session_key": codex_adapter.session_key,
+        "project_key": lambda project: normalize_project_key(
+            os.path.abspath(project)
+        ),
         "detected": lambda home, project: (
             os.path.exists(os.path.join(home, ".codex", "config.toml"))
             or os.path.exists(os.path.join(home, ".codex", "sessions"))
@@ -65,6 +74,7 @@ CLIS = {
         "find_transcripts": None,
         "parse_session": None,
         "session_key": None,
+        "project_key": lambda project: None,
         "usage_note": (
             "Cursor stores chats in undocumented SQLite; no transcript "
             "adapter -- usage unknown"
@@ -145,6 +155,16 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--json", action="store_true", help="emit JSON")
     parser.add_argument(
+        "--project-usage",
+        action="store_true",
+        help=(
+            "restrict usage counts to the current --project (default counts "
+            "usage across all projects); Codex uses the recorded cwd exactly, "
+            "while Claude attribution is best-effort slug-based; uncertain or "
+            "absent attribution is reported, not guessed."
+        ),
+    )
+    parser.add_argument(
         "--prune",
         action="store_true",
         help=(
@@ -183,6 +203,7 @@ def _build(args: argparse.Namespace) -> Report:
         find_transcripts_func = entry["find_transcripts"]
         parse_session_func = entry["parse_session"]
         session_key_func = entry["session_key"]
+        project_key_func = entry.get("project_key")
         if (
             find_transcripts_func is None
             or parse_session_func is None
@@ -196,11 +217,17 @@ def _build(args: argparse.Namespace) -> Report:
             sessions = [
                 parse_session_func(path, configured) for path in paths
             ]
+            project_filter = (
+                project_key_func(args.project)
+                if args.project_usage and project_key_func is not None
+                else None
+            )
             window = count_calls(
                 sessions,
                 [session_key_func(path, args.home) for path in paths],
                 window_sessions=args.sessions,
                 window_days=args.days,
+                project_filter=project_filter,
             )
         inputs.append(
             CliReportInput(

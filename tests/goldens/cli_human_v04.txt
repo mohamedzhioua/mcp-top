@@ -12,7 +12,7 @@ Suggested removals (never applied; mcp-top is read-only -- edit configs yourself
 
 Prune candidates -- review before removing (actual saving unknown):
   - [claude-code] beta (project) in /repo/.mcp.json -> removes advertised up to ~12 / upfront at least ~12, actual saving unknown
-      * usage is not attributed per-project; verify before removing
+      * usage is counted across all projects (home-wide), not per-project; pass --project-usage to scope counts to this project before removing
       edit: Review /repo/.mcp.json (project scope) before changing Claude Code MCP server 'beta'; candidates intentionally do not include removal commands.
 
 Definition token counts use the chars/4 heuristic; ~ means estimate.
