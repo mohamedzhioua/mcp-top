@@ -52,7 +52,9 @@ jobs:
           # A bash glob over "$GITHUB_WORKSPACE"/dist/*.whl breaks on Windows
           # when the workspace path contains backslashes; resolve it through
           # pathlib instead and assert exactly one wheel was built.
-          wheel="$(python -c "import pathlib, sys; m = sorted(pathlib.Path('dist').glob('*.whl')); assert len(m) == 1, f'expected exactly one wheel in dist/, found: {m}'; print(m[0].as_posix())")"
+          # Resolve to an ABSOLUTE path: the smoke commands below cd into
+          # $RUNNER_TEMP, where a relative dist/ path no longer exists.
+          wheel="$(python -c "import pathlib, sys; m = sorted(pathlib.Path('dist').glob('*.whl')); assert len(m) == 1, f'expected exactly one wheel in dist/, found: {m}'; print(m[0].resolve().as_posix())")"
           echo "path=$wheel" >> "$GITHUB_OUTPUT"
       - name: Smoke-test built wheel
         shell: bash
