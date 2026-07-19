@@ -4,6 +4,10 @@
 
 License: MIT - Dependencies: none (Python stdlib, 3.11+)
 
+![mcp-top ranking three Claude Code MCP servers by definition token cost against recent usage](docs/images/mcp-top-claude-code.png)
+
+*Real run against a Claude Code config: three MCP servers advertising ~12k tokens of tool definitions, with zero calls in the last 30 sessions. Token counts are chars/4 estimates; `~` marks an estimate.*
+
 ## Install
 
 The PyPI package is available as of v0.5.0:
